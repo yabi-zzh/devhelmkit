@@ -1,0 +1,20 @@
+# sdist 包含清单
+# 源码分发包只包含运行时必需文件，排除 tests/docs/.github
+
+include LICENSE
+include README.md
+include pyproject.toml
+
+# 运行时包源码（src layout）
+recursive-include src/devhelmkit/assets *.so
+recursive-include src/devhelmkit/uiviewer/static *
+include src/devhelmkit/py.typed
+
+# 排除测试、文档、CI 配置
+recursive-exclude tests *
+recursive-exclude docs *
+recursive-exclude .github *
+exclude .gitignore
+exclude *.egg-info
+recursive-exclude * __pycache__
+recursive-exclude * *.py[cod]

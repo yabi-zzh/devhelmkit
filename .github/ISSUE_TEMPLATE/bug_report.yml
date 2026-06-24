@@ -1,0 +1,61 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈问题。提交前请先搜索已有 Issue，避免重复。
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 清晰、简洁地描述遇到的问题。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 提供最小可复现代码或操作步骤。
+      placeholder: |
+        1. 调用 '...'
+        2. 执行 '...'
+        3. 出现错误
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 如有报错请粘贴完整堆栈信息。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境信息
+      description: 请填写运行环境。
+      value: |
+        - 操作系统：
+        - Python 版本：
+        - devhelmkit 版本：
+        - HarmonyOS 版本：
+        - 设备型号：
+        - hdc 版本：
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 其他有助于定位问题的上下文。
+    validations:
+      required: false

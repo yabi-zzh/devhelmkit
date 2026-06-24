@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devhelmkit"
+dynamic = ["version"]
+description = "跨平台 UI 自动化框架，当前聚焦 HarmonyOS"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.8"
+authors = [
+    { name = "devhelmkit contributors" },
+]
+keywords = ["harmonyos", "uiautomator", "ui-automation", "testing", "hypium"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "Pillow>=9.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "build>=1.0",
+    "twine>=4.0",
+]
+webview = [
+    "selenium>=4.0",
+]
+cv = [
+    "opencv-python-headless>=4.8",
+    "numpy>=1.24",
+]
+ocr = [
+    "rapidocr-onnxruntime>=1.3",
+    "opencv-python-headless>=4.8",
+    "numpy>=1.24",
+]
+all = [
+    "selenium>=4.0",
+    "opencv-python-headless>=4.8",
+    "numpy>=1.24",
+    "rapidocr-onnxruntime>=1.3",
+]
+
+[project.scripts]
+devhelmkit-uiviewer = "devhelmkit.uiviewer.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yabi-zzh/devhelmkit"
+Repository = "https://github.com/yabi-zzh/devhelmkit"
+Documentation = "https://github.com/yabi-zzh/devhelmkit/blob/main/api_reference.md"
+Issues = "https://github.com/yabi-zzh/devhelmkit/issues"
+
+# 动态版本：从 devhelmkit/__init__.py 的 __version__ 读取，避免双份维护
+[tool.setuptools.dynamic]
+version = { attr = "devhelmkit.__version__" }
+
+# src layout：包位于 src/ 下，自动发现，无需 package-dir 映射
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# 打包设备端 agent.so 资产、前端静态文件与类型标记
+[tool.setuptools.package-data]
+devhelmkit = ["assets/so/*/*.so", "uiviewer/static/*", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+pythonpath = ["tests"]

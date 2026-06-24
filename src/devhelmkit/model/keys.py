@@ -1,0 +1,375 @@
+# !/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""KeyCode：OpenHarmony 按键码枚举。
+
+重要：使用 OpenHarmony 按键码体系（非 Android KeyEvent），数值从
+2000 起步。禁止套用 Android 数值。
+采用 IntEnum 以支持数值比较。
+"""
+from enum import IntEnum
+
+
+class KeyCode(IntEnum):
+    """OpenHarmony 按键码。"""
+
+    # 功能与系统按键
+    FN = 0
+    UNKNOWN = -1
+    HOME = 1
+    BACK = 2
+    POWER = 18
+    CAMERA = 19
+    VOLUME_MUTE = 22
+    MUTE = 23
+    SLEEP = 2600
+    WAKE_UP = 2802
+    SCREENLOCK = 2809
+    VIRTUAL_MULTITASK = 2210
+
+    # 音量按键
+    VOLUME_UP = 16
+    VOLUME_DOWN = 17
+
+    # 亮度按键
+    BRIGHTNESS_UP = 40
+    BRIGHTNESS_DOWN = 41
+
+    # 多媒体按键
+    MEDIA_PLAY_PAUSE = 10
+    MEDIA_STOP = 11
+    MEDIA_NEXT = 12
+    MEDIA_PREVIOUS = 13
+    MEDIA_REWIND = 14
+    MEDIA_FAST_FORWARD = 15
+    MEDIA_PLAY = 2085
+    MEDIA_PAUSE = 2086
+    MEDIA_CLOSE = 2087
+    MEDIA_EJECT = 2088
+    MEDIA_RECORD = 2089
+
+    # 导航键
+    DPAD_UP = 2012
+    DPAD_DOWN = 2013
+    DPAD_LEFT = 2014
+    DPAD_RIGHT = 2015
+    DPAD_CENTER = 2016
+    PAGE_UP = 2068
+    PAGE_DOWN = 2069
+    MOVE_HOME = 2081
+    MOVE_END = 2082
+
+    # 数字键
+    NUM_0 = 2000
+    NUM_1 = 2001
+    NUM_2 = 2002
+    NUM_3 = 2003
+    NUM_4 = 2004
+    NUM_5 = 2005
+    NUM_6 = 2006
+    NUM_7 = 2007
+    NUM_8 = 2008
+    NUM_9 = 2009
+    STAR = 2010
+    POUND = 2011
+
+    # 字母键 A-Z
+    A = 2017
+    B = 2018
+    C = 2019
+    D = 2020
+    E = 2021
+    F = 2022
+    G = 2023
+    H = 2024
+    I = 2025
+    J = 2026
+    K = 2027
+    L = 2028
+    M = 2029
+    N = 2030
+    O = 2031
+    P = 2032
+    Q = 2033
+    R = 2034
+    S = 2035
+    T = 2036
+    U = 2037
+    V = 2038
+    W = 2039
+    X = 2040
+    Y = 2041
+    Z = 2042
+
+    # 标点与符号
+    COMMA = 2043
+    PERIOD = 2044
+    GRAVE = 2056
+    MINUS = 2057
+    EQUALS = 2058
+    LEFT_BRACKET = 2059
+    RIGHT_BRACKET = 2060
+    BACKSLASH = 2061
+    SEMICOLON = 2062
+    APOSTROPHE = 2063
+    SLASH = 2064
+    AT = 2065
+    PLUS = 2066
+
+    # 编辑与控制键
+    TAB = 2049
+    SPACE = 2050
+    SYM = 2051
+    EXPLORER = 2052
+    ENVELOPE = 2053
+    ENTER = 2054
+    DEL = 2055
+    ESCAPE = 2070
+    FORWARD_DEL = 2071
+    INSERT = 2083
+    FORWARD = 2084
+    MENU = 2067
+
+    # 修饰键
+    ALT_LEFT = 2045
+    ALT_RIGHT = 2046
+    SHIFT_LEFT = 2047
+    SHIFT_RIGHT = 2048
+    CTRL_LEFT = 2072
+    CTRL_RIGHT = 2073
+    CAPS_LOCK = 2074
+    SCROLL_LOCK = 2075
+    META_LEFT = 2076
+    META_RIGHT = 2077
+    FUNCTION = 2078
+    SYSRQ = 2079
+    BREAK = 2080
+
+    # 功能键 F1-F24
+    F1 = 2090
+    F2 = 2091
+    F3 = 2092
+    F4 = 2093
+    F5 = 2094
+    F6 = 2095
+    F7 = 2096
+    F8 = 2097
+    F9 = 2098
+    F10 = 2099
+    F11 = 2100
+    F12 = 2101
+    F13 = 2816
+    F14 = 2817
+    F15 = 2818
+    F16 = 2819
+    F17 = 2820
+    F18 = 2821
+    F19 = 2822
+    F20 = 2823
+    F21 = 2824
+    F22 = 2825
+    F23 = 2826
+    F24 = 2827
+
+    # 小键盘
+    NUM_LOCK = 2102
+    NUMPAD_0 = 2103
+    NUMPAD_1 = 2104
+    NUMPAD_2 = 2105
+    NUMPAD_3 = 2106
+    NUMPAD_4 = 2107
+    NUMPAD_5 = 2108
+    NUMPAD_6 = 2109
+    NUMPAD_7 = 2110
+    NUMPAD_8 = 2111
+    NUMPAD_9 = 2112
+    NUMPAD_DIVIDE = 2113
+    NUMPAD_MULTIPLY = 2114
+    NUMPAD_SUBTRACT = 2115
+    NUMPAD_ADD = 2116
+    NUMPAD_DOT = 2117
+    NUMPAD_COMMA = 2118
+    NUMPAD_ENTER = 2119
+    NUMPAD_EQUALS = 2120
+    NUMPAD_LEFT_PAREN = 2121
+    NUMPAD_RIGHT_PAREN = 2122
+    NUMPAD_PLUSMINUS = 2611
+
+    # 日文/韩文键
+    ZENKAKU_HANKAKU = 2601
+    ND = 2602
+    RO = 2603
+    KATAKANA = 2604
+    HIRAGANA = 2605
+    HENKAN = 2606
+    KATAKANA_HIRAGANA = 2607
+    MUHENKAN = 2608
+    LINEFEED = 2609
+    MACRO = 2610
+    SCALE = 2612
+    HANGUEL = 2613
+    HANJA = 2614
+    YEN = 2615
+
+    # 多媒体扩展键
+    STOP = 2616
+    AGAIN = 2617
+    PROPS = 2618
+    UNDO = 2619
+    COPY = 2620
+    OPEN = 2621
+    PASTE = 2622
+    FIND = 2623
+    CUT = 2624
+    HELP = 2625
+    CALC = 2626
+    FILE = 2627
+    BOOKMARKS = 2628
+    NEXT = 2629
+    PLAYPAUSE = 2630
+    PREVIOUS = 2631
+    STOPCD = 2632
+    CONFIG = 2634
+    REFRESH = 2635
+    EXIT = 2636
+    EDIT = 2637
+    SCROLLUP = 2638
+    SCROLLDOWN = 2639
+    NEW = 2640
+    REDO = 2641
+    CLOSE = 2642
+    PLAY = 2643
+    BASSBOOST = 2644
+    PRINT = 2645
+    CHAT = 2646
+    FINANCE = 2647
+    CANCEL = 2648
+    KBDILLUM_TOGGLE = 2649
+    KBDILLUM_DOWN = 2650
+    KBDILLUM_UP = 2651
+    SEND = 2652
+    REPLY = 2653
+    FORWARDMAIL = 2654
+    SAVE = 2655
+    DOCUMENTS = 2656
+    VIDEO_NEXT = 2657
+    VIDEO_PREV = 2658
+    BRIGHTNESS_CYCLE = 2659
+    BRIGHTNESS_ZERO = 2660
+    DISPLAY_OFF = 2661
+    BTN_MISC = 2662
+    GOTO = 2663
+    INFO = 2664
+    PROGRAM = 2665
+    PVR = 2666
+    SUBTITLE = 2667
+    FULL_SCREEN = 2668
+    KEYBOARD = 2669
+    ASPECT_RATIO = 2670
+    PC = 2671
+    TV = 2672
+    TV2 = 2673
+    VCR = 2674
+    VCR2 = 2675
+    SAT = 2676
+    CD = 2677
+    TAPE = 2678
+    TUNER = 2679
+    PLAYER = 2680
+    DVD = 2681
+    AUDIO = 2682
+    VIDEO = 2683
+    MEMO = 2684
+    CALENDAR = 2685
+    RED = 2686
+    GREEN = 2687
+    YELLOW = 2688
+    BLUE = 2689
+    CHANNELUP = 2690
+    CHANNELDOWN = 2691
+    LAST = 2692
+    RESTART = 2693
+    SLOW = 2694
+    SHUFFLE = 2695
+    VIDEOPHONE = 2696
+    GAMES = 2697
+    ZOOMIN = 2698
+    ZOOMOUT = 2699
+    ZOOMRESET = 2700
+    WORDPROCESSOR = 2701
+    EDITOR = 2702
+    SPREADSHEET = 2703
+    GRAPHICSEDITOR = 2704
+    PRESENTATION = 2705
+    DATABASE = 2706
+    NEWS = 2707
+    VOICEMAIL = 2708
+    ADDRESSBOOK = 2709
+    MESSENGER = 2710
+    BRIGHTNESS_TOGGLE = 2711
+    SPELLCHECK = 2712
+    COFFEE = 2713
+    MEDIA_REPEAT = 2714
+    IMAGES = 2715
+    BUTTONCONFIG = 2716
+    TASKMANAGER = 2717
+    JOURNAL = 2718
+    CONTROLPANEL = 2719
+    APPSELECT = 2720
+    SCREENSAVER = 2721
+    ASSISTANT = 2722
+    KBD_LAYOUT_NEXT = 2723
+    BRIGHTNESS_MIN = 2724
+    BRIGHTNESS_MAX = 2725
+    KBDINPUTASSIST_PREV = 2726
+    KBDINPUTASSIST_NEXT = 2727
+    KBDINPUTASSIST_PREVGROUP = 2728
+    KBDINPUTASSIST_NEXTGROUP = 2729
+    KBDINPUTASSIST_ACCEPT = 2730
+    KBDINPUTASSIST_CANCEL = 2731
+
+    # 其他系统键
+    FRONT = 2800
+    SETUP = 2801
+    SENDFILE = 2803
+    DELETEFILE = 2804
+    XFER = 2805
+    PROG1 = 2806
+    PROG2 = 2807
+    MSDOS = 2808
+    DIRECTION_ROTATE_DISPLAY = 2810
+    CYCLEWINDOWS = 2811
+    COMPUTER = 2812
+    EJECTCLOSECD = 2813
+    ISO = 2814
+    MOVE = 2815
+    PROG3 = 2828
+    PROG4 = 2829
+    DASHBOARD = 2830
+    SUSPEND = 2831
+    HP = 2832
+    SOUND = 2833
+    QUESTION = 2834
+    CONNECT = 2836
+    SPORT = 2837
+    SHOP = 2838
+    ALTERASE = 2839
+    SWITCHVIDEOMODE = 2841
+    BATTERY = 2842
+    BLUETOOTH = 2843
+    WLAN = 2844
+    UWB = 2845
+    WWAN_WIMAX = 2846
+    RFKILL = 2847
+
+    # 频道与游戏手柄按键
+    CHANNEL = 3001
+    BTN_0 = 3100
+    BTN_1 = 3101
+    BTN_2 = 3102
+    BTN_3 = 3103
+    BTN_4 = 3104
+    BTN_5 = 3105
+    BTN_6 = 3106
+    BTN_7 = 3107
+    BTN_8 = 3108
+    BTN_9 = 3109

@@ -1,0 +1,173 @@
+# !/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""JpegServer：jpeg_port 独立图片流服务。
+
+只负责输出 JPEG 单帧和 MJPEG 实时流，不处理 touch 或 API。
+"""
+from __future__ import annotations
+
+import logging
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+from devhelmkit.uiviewer.protocol import CaptureMode
+from devhelmkit.uiviewer.registry import DeviceSessionRegistry
+from devhelmkit.uiviewer import perf
+
+logger = logging.getLogger(__name__)
+
+_MJPEG_BOUNDARY = "uvframeboundary"
+_MJPEG_CONTENT_TYPE = "multipart/x-mixed-replace; boundary=%s" % _MJPEG_BOUNDARY
+
+
+class JpegRequestHandler(BaseHTTPRequestHandler):
+    """jpeg_port 请求处理器。"""
+
+    registry: DeviceSessionRegistry = None  # type: ignore
+    # snapshot.jpg 高频拉取时复用连接；MJPEG 为长连接不受影响
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, format, *args):
+        logger.debug("jpeg_server %s - %s", self.address_string(), format % args)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query)
+
+        if path == "/snapshot.jpg":
+            self._handle_snapshot(params)
+        elif path == "/stream.mjpeg":
+            self._handle_mjpeg(params)
+        else:
+            self.send_error(404, "Not Found")
+
+    def _handle_snapshot(self, params: dict):
+        serial = params.get("serial", [None])[0]
+        if not serial:
+            self._json_error(400, "missing serial")
+            return
+
+        session = self.registry.get_session(serial)
+        if session is None or not session.active:
+            self._json_error(404, "session not active")
+            return
+
+        if session.mode != CaptureMode.SNAPSHOT:
+            self._json_error(400, "snapshot mode required")
+            return
+
+        frame_id = None
+        raw_frame_id = params.get("frame", [None])[0]
+        if raw_frame_id:
+            try:
+                frame_id = int(raw_frame_id)
+            except ValueError:
+                self._json_error(400, "invalid frame")
+                return
+
+        try:
+            if frame_id is None:
+                jpeg_bytes, meta = session.capture_jpeg()
+            else:
+                jpeg_bytes = session.get_cached_jpeg(frame_id)
+                if jpeg_bytes is None:
+                    self._json_error(404, "frame not found")
+                    return
+        except Exception as e:
+            logger.warning("snapshot 截图失败: %s", e)
+            self._json_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(jpeg_bytes)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(jpeg_bytes)
+
+    def _handle_mjpeg(self, params: dict):
+        serial = params.get("serial", [None])[0]
+        if not serial:
+            self._json_error(400, "missing serial")
+            return
+
+        session = self.registry.get_session(serial)
+        if session is None or not session.active:
+            self._json_error(404, "session not active")
+            return
+
+        if session.mode != CaptureMode.LIVE:
+            self._json_error(400, "live mode required for mjpeg stream")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", _MJPEG_CONTENT_TYPE)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        try:
+            last_seq = -1
+            idle_count = 0
+            meter = perf.RateMeter("mjpeg[%s]" % serial)
+            t_write0 = 0.0
+            while True:
+                current_session = self.registry.get_session(serial)
+                if current_session is None or not current_session.active:
+                    break
+                if current_session.mode != CaptureMode.LIVE:
+                    break
+                seq, frame = current_session.get_stream_frame_seq()
+                # 仅在帧变化时推送，避免静止画面重复编码/传输
+                if frame is not None and seq != last_seq:
+                    last_seq = seq
+                    idle_count = 0
+                    header = (
+                        "\r\n--%s\r\n"
+                        "Content-Type: image/jpeg\r\n"
+                        "Content-Length: %d\r\n\r\n"
+                    ) % (_MJPEG_BOUNDARY, len(frame))
+                    if perf.enabled():
+                        t_write0 = perf.now_ms()
+                    self.wfile.write(header.encode("ascii"))
+                    self.wfile.write(frame)
+                    self.wfile.flush()
+                    if perf.enabled():
+                        write_ms = perf.now_ms() - t_write0
+                        meter.tick(len(frame))
+                        # 单帧 socket 写入超过阈值时单独告警（可能是浏览器/网络背压）
+                        if write_ms > 20.0:
+                            perf.log("[perf] mjpeg slow write: %.1fms size=%.1fKB",
+                                     write_ms, len(frame) / 1024.0)
+                else:
+                    # 长时间无新帧时定期发送空白注释行做心跳，探测断连
+                    idle_count += 1
+                    if idle_count >= 300:  # ~5s 无新帧
+                        idle_count = 0
+                        self.wfile.write(b"\r\n")
+                        self.wfile.flush()
+                time.sleep(0.016)  # ~60fps 轮询上限
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            logger.warning("mjpeg 流中断: %s", e)
+
+    def _json_error(self, status: int, message: str) -> None:
+        """统一错误响应：JSON body 承载消息，避免非 ASCII 进入 status line。"""
+        import json
+        body = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def create_jpeg_server(host: str, port: int,
+                       registry: DeviceSessionRegistry) -> ThreadingHTTPServer:
+    """创建 jpeg_port HTTP 服务。"""
+    JpegRequestHandler.registry = registry
+    server = ThreadingHTTPServer((host, port), JpegRequestHandler)
+    server.daemon_threads = True
+    return server

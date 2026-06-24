@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# 例外：设备端 agent 二进制资产需入库（运行时依赖）
+!src/devhelmkit/assets/so/**/*.so
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 类型检查
+.mypy_cache/
+.pyre/
+.pytype/
+
+# 日志与临时文件
+*.log
+logs/
+tmp/
+*.tmp
+
+# 设备端产物（不应入库）
+*.hprof
+
+# 本地测试与文档（不入库，PyPI 发布包由 MANIFEST.in 排除）
+docs/
+tests/

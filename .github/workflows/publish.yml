@@ -1,0 +1,57 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装项目与测试依赖
+        run: pip install -e ".[dev]"
+
+      - name: 编译校验
+        run: python -m compileall -q src
+
+      - name: 安装构建工具
+        run: pip install build
+
+      - name: 构建 sdist 和 wheel
+        run: python -m build
+
+      - name: 校验产物
+        run: pip install twine && twine check dist/*
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: 发布到 PyPI（Trusted Publisher）
+        uses: pypa/gh-action-pypi-publish@release/v1
