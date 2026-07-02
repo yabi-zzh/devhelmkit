@@ -5,6 +5,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1]
+
+### 修复
+
+- 修复 HarmonyOS 应用启动入口解析：主 Ability 改为读取 `mainAbility` 的第一个非空值，`module` 仅在显式传入时拼接 `-m`。
+
 ## [0.3.0]
 
 ### 新增
@@ -24,4 +30,5 @@
 - 采用 src layout 目录结构（包源码位于 `src/devhelmkit/`）。
 - `license` 声明改用 SPDX 表达式格式。
 
+[0.3.1]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yabi-zzh/devhelmkit/releases/tag/v0.3.0
