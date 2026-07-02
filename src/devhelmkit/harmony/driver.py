@@ -106,7 +106,7 @@ class HarmonyDriver(BaseDriver):
         # 设备属性不随屏幕变化，长期缓存
         self._device_props: Optional[Dict[str, str]] = None
         # main ability 探测缓存（per-driver 实例，多设备隔离）
-        self._main_ability_cache: Optional[Dict[str, Tuple[str, str]]] = None
+        self._main_ability_cache: Optional[Dict[str, str]] = None
 
     # ============================================================
     # 生命周期
@@ -329,18 +329,13 @@ class HarmonyDriver(BaseDriver):
                   *, module: Optional[str] = None) -> None:
         """启动应用。
 
-        activity 为 None 时自动探测主入口，并解析所属 module 附加 `-m`，
-        避免 Stage 模型下同名 ability 跨模块歧义；探测失败时回退默认
-        EntryAbility，由 aa start 返回真实执行错误。
-        显式传入 activity 时保留短名兼容（不含点则前缀 package）。
-        显式传入 module 时以入参为准，不被自动探测结果覆盖。
+        activity 为 None 时从设备侧 bm dump 自动探测主 Ability。
+        `aa start -a` 使用设备声明的 Ability 名；Stage 模型下常见为短名
+        `EntryAbility`，不能强行拼成 `package.EntryAbility`。
+        module 为可选入参；仅显式传入时拼接 `-m`。
         """
         if activity is None:
-            resolved_module, ability = self._resolve_main_ability(package)
-            if module is None:
-                module = resolved_module
-        elif "." not in activity:
-            ability = package + "." + activity
+            ability = self._resolve_main_ability(package)
         else:
             ability = activity
         cmd = "aa start -a %s -b %s" % (ability, package)
@@ -493,69 +488,37 @@ class HarmonyDriver(BaseDriver):
             logger.warning("应用信息解析失败: %s", e)
         return {}
 
-    def _resolve_entry(self, package: str) -> Optional[Tuple[str, str]]:
-        """探测应用主入口 (module, ability_full_name)。
+    def _resolve_entry(self, package: str) -> Optional[str]:
+        """探测 aa start 可用主 Ability 名。
 
-        数据来源：bm dump -n {package} → hapModuleInfos[].abilityInfos[]
-        实测 abilityInfos[].name 为短名（如 "CalculatorAbility"），
-        而 module.mainAbility 为全限定名（如 "com.xxx.CalculatorAbility"），
-        因此比较前需先把短名拼成全名。
-
-        选择优先级（按 tuple 排序，越靠前权重越高）：
-          1) 声明了 action.system.home 的 launcher ability
-          2) 所在模块 == 应用 mainEntry
-          3) ability 全名 == 模块 mainAbility
+        数据来源：bm dump -n {package} 中的 mainAbility。
+        部分包会输出多个 mainAbility，其中多数为空；入口解析只取第一个非空值。
         """
-        info = self.get_app_info(package)
-        if not info:
-            return None
-
-        main_entry = info.get("mainEntry", "")
-        candidates = []
-        for module_info in info.get("hapModuleInfos") or []:
-            module_name = module_info.get("name", "")
-            module_main_ability = module_info.get("mainAbility", "")
-            for ability_info in module_info.get("abilityInfos") or []:
-                short_name = ability_info.get("name", "")
-                if not short_name:
-                    continue
-                full_name = short_name if short_name.startswith(package + ".") else "%s.%s" % (package, short_name)
-                is_launcher = any(
-                    "action.system.home" in (skill.get("actions") or [])
-                    for skill in (ability_info.get("skills") or [])
-                )
-                key = (
-                    is_launcher,
-                    module_name == main_entry,
-                    full_name == module_main_ability,
-                )
-                candidates.append((key, module_name, full_name))
-
-        if not candidates:
-            return None
-        _, best_module, best_ability = max(candidates, key=lambda c: c[0])
-        return best_module, best_ability
+        output = self.shell("bm dump -n %s" % shlex.quote(package))
+        pattern = r'"mainAbility"\s*:\s*"([^"]*)"'
+        for value in re.findall(pattern, output):
+            ability = value.strip()
+            if ability:
+                return ability
+        return None
 
     def get_app_main_ability(self, package: str) -> Optional[str]:
-        """自动探测应用主 Ability 全名（不含 module 信息，向后兼容）。"""
-        entry = self._resolve_entry(package)
-        return entry[1] if entry else None
+        """自动探测 aa start 可用主 Ability 名。"""
+        return self._resolve_entry(package)
 
-    def _resolve_main_ability(self, package: str) -> Tuple[str, str]:
-        """解析主入口 (module, ability)，带缓存。
+    def _resolve_main_ability(self, package: str) -> str:
+        """解析主 Ability，带缓存。
 
-        探测失败时不在框架层提前中断，回退到默认 .MainAbility，
+        探测失败时不在框架层提前中断，回退到 HarmonyOS 默认入口，
         让设备侧 aa start 返回真实执行错误，便于定位实际失败原因。
         """
         if self._main_ability_cache is None:
             self._main_ability_cache = {}
         if package in self._main_ability_cache:
             return self._main_ability_cache[package]
-        entry = self._resolve_entry(package)
-        if entry is None:
-            entry = ("", package + ".EntryAbility")
-        self._main_ability_cache[package] = entry
-        return entry
+        ability = self._resolve_entry(package) or "EntryAbility"
+        self._main_ability_cache[package] = ability
+        return ability
 
     # ============================================================
     # 坐标操作
