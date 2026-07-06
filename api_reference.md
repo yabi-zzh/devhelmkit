@@ -548,7 +548,7 @@ rect = d.vision.find_image("icon.png", mode="feature", threshold=0.7)
 |------|------|--------|------|
 | text | str | — | 目标文本 |
 | region | - | None | 查找区域 |
-| fuzzy | bool | False | `True` 子串匹配（忽略大小写），`False` 精确匹配 |
+| fuzzy | bool | False | `True` 归一化子串匹配 + 相似度兜底（忽略大小写与空白），`False` 精确匹配 |
 | index | int | 1 | 匹配到多个结果时选择第几个（1-based） |
 | timeout | float | None | 超时秒 |
 
@@ -1303,6 +1303,7 @@ d = devhelmkit.connect(config=config)
 | screenshot_stream_scale | float | 0.99 | 流截图缩放比例 |
 | screenshot_retry_times | int | 3 | 截图重试次数 |
 | stop_daemon_on_close | bool | False | `close()` 时是否停止 uitest 守护进程 |
+| restart_daemon_on_setup | bool | False | setup 时是否先清理残留 uitest 守护进程再重启（绕过复用优先） |
 | hdc_path | str | `"hdc"` | hdc 可执行文件路径 |
 | default_display_id | int | 0 | 默认 Display ID |
 | debug_page_info | bool | True | 调试页面信息 |

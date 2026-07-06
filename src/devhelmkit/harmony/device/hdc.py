@@ -71,13 +71,15 @@ class HdcDevice:
         """
         cls._hdc_path = path
 
-    def __init__(self, serial: str):
+    def __init__(self, serial: str, restart_daemon_on_setup: bool = False):
         self.serial = serial
         self._socket: Optional[socket.socket] = None
         self._state = STATE_CLOSED
         self._fport_established = False
         self._local_port: Optional[int] = None
-        self._agent = AgentManager(self)
+        self._agent = AgentManager(
+            self, restart_daemon_on_setup=restart_daemon_on_setup
+        )
 
     # ============================================================
     # hdc 命令封装

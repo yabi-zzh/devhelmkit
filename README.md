@@ -219,6 +219,15 @@ config = HarmonyDriverConfig(stop_daemon_on_close=True)
 d = devhelmkit.connect(config=config)
 ```
 
+启动时先清理残留守护进程再重启（默认复用已有进程；开启后可规避残留 daemon 版本不匹配或状态损坏导致的连接异常）：
+
+```python
+from devhelmkit.harmony.config import HarmonyDriverConfig
+
+config = HarmonyDriverConfig(restart_daemon_on_setup=True)
+d = devhelmkit.connect(config=config)
+```
+
 ### 指定设备
 
 ```python
@@ -309,7 +318,7 @@ d.vision.wait_image("loading_done.png", timeout=15)
 # 查找并点击文本
 d.vision.click_text("设置")
 
-# 模糊匹配（忽略大小写的子串匹配）
+# 模糊匹配（归一化子串 + 相似度兜底，忽略大小写与空白）
 d.vision.click_text("设置", fuzzy=True)
 
 # 获取 OCR 结果含坐标

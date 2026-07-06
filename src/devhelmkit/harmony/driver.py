@@ -91,7 +91,10 @@ class HarmonyDriver(BaseDriver):
         # 应用 hdc 路径配置（全局生效，影响所有后续 HdcDevice 实例）
         if self._config.hdc_path and self._config.hdc_path != "hdc":
             HdcDevice.set_hdc_path(self._config.hdc_path)
-        self._device = HdcDevice(serial)
+        self._device = HdcDevice(
+            serial,
+            restart_daemon_on_setup=self._config.restart_daemon_on_setup,
+        )
         self._setup_device()
         self._rpc = RpcClient(self._device)
         self._finder = ComponentFinder(self._rpc, self._config)

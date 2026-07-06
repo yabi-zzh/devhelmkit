@@ -50,7 +50,7 @@ class ScreenshotMode:
 
 @dataclass
 class HarmonyDriverConfig:
-    """鸿蒙驱动配置，共 26 个配置项。
+    """鸿蒙驱动配置，共 27 个配置项。
 
     控制鸿蒙驱动行为：控件查找策略、弹窗处理、操作等待、文本输入、
     截图、日志、显示、调试、模板匹配、扩展能力、资源清理、hdc 路径。
@@ -104,6 +104,9 @@ class HarmonyDriverConfig:
     # 资源清理
     # close() 时是否停止设备端 uitest 守护进程，默认 False 复用进程
     stop_daemon_on_close: bool = False
+    # setup 时是否先清理设备端残留 uitest 守护进程再重新启动，默认 False 复用进程。
+    # True 时绕过复用优先策略，规避残留 daemon 版本不匹配或状态损坏导致的连接异常。
+    restart_daemon_on_setup: bool = False
 
     # hdc 可执行文件路径，默认 "hdc"（从 PATH 查找）
     # 指定后 connect 时通过 HdcDevice.set_hdc_path 设置全局路径

@@ -78,10 +78,13 @@ class AgentManager:
     管理流程：探测设备信息 → 检查守护进程 → 推送 agent.so → 启动守护进程 → 删除设备端 so。
     """
 
-    def __init__(self, device: 'HdcDevice'):
+    def __init__(self, device: 'HdcDevice',
+                 restart_daemon_on_setup: bool = False):
         self._device = device
         self._abi: Optional[str] = None
         self._protocol_version: Optional[int] = None
+        # setup 时是否先清理残留 daemon 再启动（绕过复用优先策略）
+        self._restart_daemon_on_setup = restart_daemon_on_setup
 
     def detect_device_info(self) -> Tuple[str, int]:
         """探测设备 ABI 与 uitest 协议版本。
@@ -114,7 +117,12 @@ class AgentManager:
         if self._abi is None or self._protocol_version is None:
             self.detect_device_info()
 
-        if self._is_daemon_running():
+        # 启动清理开关：先杀残留 daemon 再重启，规避复用到版本不匹配或状态损坏的进程
+        if self._restart_daemon_on_setup:
+            logger.debug("restart_daemon_on_setup=True，清理残留守护进程 (serial=%s)",
+                         self._device.serial)
+            self.stop_daemon()
+        elif self._is_daemon_running():
             logger.debug("uitest 守护进程已运行，复用 (serial=%s)",
                          self._device.serial)
             return
@@ -127,29 +135,14 @@ class AgentManager:
     def stop_daemon(self) -> None:
         """停止设备端 uitest 守护进程。
 
-        复用 _is_daemon_running 的过滤逻辑定位目标 pid，避免误杀
-        scrcpy_server、extension-name 等扩展进程（其 cmdline 可能
-        含 uitest 关键字）。pkill -f 无法通过管道过滤目标，故改用
-        pgrep -fl 获取 pid+cmdline，过滤扩展进程后逐个 kill。
+        复用 _find_daemon_pids 定位目标 pid 后逐个 kill -9。按 host 侧
+        Python 过滤 cmdline，天然排除 scrcpy_server、extension-name 等
+        扩展进程与 grep 自身，无需依赖设备端 pgrep 能力。
         """
-        if not self._is_daemon_running():
+        pids = self._find_daemon_pids()
+        if not pids:
             logger.debug("uitest 守护进程未运行，无需停止 (serial=%s)",
                          self._device.serial)
-            return
-        # pgrep -fl 输出 "pid cmdline"，grep -v 过滤扩展进程与 pgrep 自身
-        cmd = ('pgrep -fl "uitest.*start-daemon.*singleness" '
-               '| grep -v "extension-name" | grep -v "scrcpy_server" '
-               '| grep -v "pgrep"')
-        try:
-            out = self._device.shell(cmd, timeout=10)
-        except DeviceConnectError as e:
-            logger.warning("获取 uitest 守护进程 pid 失败 (serial=%s): %s",
-                        self._device.serial, e)
-            return
-        # pgrep -fl 输出格式 "pid cmdline"，取首列 pid
-        pids = [line.split()[0] for line in out.splitlines() if line.strip()]
-        if not pids:
-            logger.debug("无匹配 pid，无需停止 (serial=%s)", self._device.serial)
             return
         for pid in pids:
             try:
@@ -158,7 +151,7 @@ class AgentManager:
                 logger.warning("kill -9 pid=%s 失败 (serial=%s): %s",
                             pid, self._device.serial, e)
         # 确认进程已退出，避免端口占用影响下次启动
-        if self._is_daemon_running():
+        if self._find_daemon_pids():
             logger.warning("uitest 守护进程仍存活 (serial=%s)", self._device.serial)
         else:
             logger.debug("uitest 守护进程已停止 (serial=%s)",
@@ -263,20 +256,39 @@ class AgentManager:
     # ============================================================
 
     def _is_daemon_running(self) -> bool:
-        """检查 uitest 守护进程是否运行。
+        """检查 uitest 守护进程是否运行。"""
+        return bool(self._find_daemon_pids())
 
-        过滤扩展进程与 pgrep 自身：scrcpy_server、extension-name 等扩展
-        进程的 cmdline 可能包含 uitest 关键字；pgrep 命令自身的 shell
-        进程 cmdline 含匹配模式字符串，均会导致误判为守护进程已运行。
+    def _find_daemon_pids(self) -> list:
+        """定位设备端 uitest 守护进程 pid 列表。
+
+        设备端仅执行最通用的 `ps -ef`（toybox 均支持），真正的过滤放在
+        host 侧 Python，规避设备端 pgrep -f 匹配不完整/输出格式不一致的问题：
+
+        - cmdline 需同时含 "start-daemon" 与 "singleness"，精确锁定守护进程；
+        - 排除 grep/ps 自身进程行；
+        - scrcpy_server、extension-name 等扩展进程 cmdline 不含上述组合，
+          天然被排除，无需逐个 grep -v 打补丁。
+
+        ps -ef 列布局: UID PID PPID ... CMD，pid 取第 2 列。
         """
-        cmd = ('pgrep -fl "uitest.*start-daemon.*singleness" '
-               '| grep -v "extension-name" | grep -v "scrcpy_server" '
-               '| grep -v "pgrep"')
         try:
-            out = self._device.shell(cmd, timeout=10)
-        except DeviceConnectError:
-            return False
-        return bool(out.strip())
+            out = self._device.shell("ps -ef", timeout=10)
+        except DeviceConnectError as e:
+            logger.warning("查询 uitest 进程失败 (serial=%s): %s",
+                           self._device.serial, e)
+            return []
+        pids = []
+        for line in out.splitlines():
+            if "start-daemon" not in line or "singleness" not in line:
+                continue
+            if "grep" in line or "ps -ef" in line:
+                continue
+            fields = line.split()
+            if len(fields) < 2 or not fields[1].isdigit():
+                continue
+            pids.append(fields[1])
+        return pids
 
     def _start_daemon_and_wait(self) -> None:
         """启动守护进程并渐进式等待就绪。"""

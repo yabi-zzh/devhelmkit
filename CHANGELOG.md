@@ -5,6 +5,20 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+
+- HarmonyOS 新增配置项 `restart_daemon_on_setup`（默认 `False`）：setup 时先清理设备端残留 uitest 守护进程再重启，绕过复用优先策略，规避残留 daemon 版本不匹配或状态损坏导致的连接异常。
+
+### 变更
+
+- HarmonyOS uitest 守护进程探测与清理弃用设备端 `pgrep -fl`，改为 `ps -ef` 拉原始输出、host 侧 Python 过滤 pid，规避 toybox `pgrep -f` 匹配不完整或输出格式不一致的问题；探测与清理复用同一套匹配逻辑。
+
+### 修复
+
+- 优化 OCR 模糊文本匹配：`fuzzy=True` 先对文本做归一化（NFKC 兼容分解、去空白与零宽字符、casefold 忽略大小写）后子串匹配，再以 `SequenceMatcher` 相似度兜底，提升识别文本的匹配鲁棒性。
+
 ## [0.3.1]
 
 ### 修复
