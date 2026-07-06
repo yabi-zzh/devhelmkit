@@ -28,6 +28,7 @@ classifiers = [
 ]
 dependencies = [
     "Pillow>=9.0.0",
+    "lxml>=5.0.0",
 ]
 
 [project.optional-dependencies]
