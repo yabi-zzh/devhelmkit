@@ -232,10 +232,12 @@ d(className="Button", textContains="提交")
 
 #### `xpath(xpath: str) -> BaseComponent`
 
-XPath 选择器，返回控件对象。
+XPath 选择器，返回控件对象。HarmonyOS 使用 `lxml` 标准 XPath 1.0 引擎查询当前控件树，支持属性谓词、位置、层级和组合表达式。命中节点会按 `bounds` 精确锚定回设备端 Component，因此可以继续执行点击、输入、文本读取等控件操作。
 
 ```python
 d.xpath("//Text[@text='标题']").click()
+d.xpath("(//Button[@enabled='true'])[2]").get_text()
+d.xpath("//List/*[contains(@text, '设置')]").click()
 ```
 
 ---

@@ -5,6 +5,31 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0]
+
+### 新增
+
+- HarmonyOS XPath 改用 `lxml` 标准 XPath 1.0 引擎，支持谓词、位置和组合表达式；查询命中的节点可通过 `bounds` 精确锚定回设备端控件并继续执行点击、输入、属性读取等操作。
+- UI Viewer 新增控件 XPath 候选生成与切换，可按控件类型、ID、文本等语义生成定位表达式。
+- UI Viewer 新增操作录制，可记录点击、长按、输入、滑动和按键操作，生成可复制的 Python 自动化脚本，并支持删除或清空录制步骤。
+
+### 变更
+
+- UI Viewer 实时截图流、控件树模型和前端交互完成升级：统一顶层属性式与 `attributes` 包裹式控件树，增强画面缩放、选区和节点联动。
+- XPath 与 UI Viewer 共享控件属性归一化边界，减少不同控件树来源之间的结构差异。
+- UI Viewer 改用系统字体栈，不再依赖第三方字体 CDN，保持离线可用。
+
+### 性能
+
+- 优化录制定位器生成：优先返回不可超越的唯一 ID 或高质量语义候选，避免无效 XPath 与相对定位计算。
+- 滑动录制直接按坐标生成脚本，不再解析控件树或统计选择器唯一性。
+
+### 修复
+
+- 修复实时截图流异常断开时等待消费者不能立即被唤醒的问题。
+- 收紧 UI Viewer JSON 请求边界：处理非法 `Content-Length`，限制请求体大小，并拒绝非对象 JSON。
+- 修复属性式控件树的 `children` 子树被复制进扁平节点属性，导致响应体随树深度放大的问题。
+
 ## [0.3.2]
 
 ### 新增
@@ -44,6 +69,7 @@
 - 采用 src layout 目录结构（包源码位于 `src/devhelmkit/`）。
 - `license` 声明改用 SPDX 表达式格式。
 
+[0.4.0]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/yabi-zzh/devhelmkit/releases/tag/v0.3.0
