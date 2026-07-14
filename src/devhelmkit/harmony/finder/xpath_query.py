@@ -39,6 +39,16 @@ _CTRL_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 _DHK_IDX_ATTR = "_dhkNodeIdx"
 
 
+def is_valid_xpath(xpath: str) -> bool:
+    """校验 XPath 语法，供等待查询在轮询前快速失败。"""
+    try:
+        etree.XPath(xpath)
+    except etree.XPathError as e:
+        logger.warning("XPath 表达式无效 [%s]: %s", xpath, e)
+        return False
+    return True
+
+
 def query_xpath(tree: Dict[str, Any], xpath: str) -> List[Dict[str, Any]]:
     """在控件树上执行标准 XPath 查询，返回匹配的原始 JSON 节点列表。
 

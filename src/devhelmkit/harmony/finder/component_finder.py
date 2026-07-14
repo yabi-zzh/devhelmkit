@@ -31,6 +31,7 @@ from devhelmkit.harmony.finder.selector_adapter import (
 )
 from devhelmkit.harmony.finder.xpath_query import (
     extract_node_attributes,
+    is_valid_xpath,
     query_xpath,
 )
 from devhelmkit.harmony.finder.popup_handler import PopupHandler
@@ -48,6 +49,19 @@ ON_SEED_REF = "On#seed"
 
 # 默认查找超时（秒）
 DEFAULT_FIND_TIMEOUT = 10.0
+
+# 可无损下推为设备端 On.type 的纯类型 XPath。
+_SIMPLE_TYPE_XPATH_RE = re.compile(r'^\s*//([A-Za-z_][\w.\-]*)\s*$')
+
+
+def _simple_type_xpath_selector(xpath: Optional[str]) -> Optional[SelectorSpec]:
+    """把纯类型 XPath 转为设备端选择器，复杂表达式返回 None。"""
+    if not xpath:
+        return None
+    match = _SIMPLE_TYPE_XPATH_RE.fullmatch(xpath)
+    if match is None:
+        return None
+    return build_selector(type=match.group(1))
 
 
 class ComponentFinder:
@@ -80,8 +94,16 @@ class ComponentFinder:
             ComponentNotFoundError: 控件未找到
             RpcError: RPC 通信异常
         """
-        # xpath 选择器走客户端查询：dump 控件树 → 查询节点 → 降级 SelectorSpec → By 链
+        # 纯类型 xpath 可无损下推到设备端，跳过 captureLayout 与 bounds 锚定。
         if selector.xpath is not None:
+            direct_selector = _simple_type_xpath_selector(selector.xpath)
+            if direct_selector is not None:
+                try:
+                    return self.find_component(direct_selector, timeout)
+                except ComponentNotFoundError as e:
+                    raise ComponentNotFoundError(
+                        "xpath 未匹配控件: %s" % selector.xpath
+                    ) from e
             return self._find_by_xpath(selector, timeout)
         by_ref = self._build_by_ref(selector)
         timeout_ms = int(timeout * 1000)
@@ -122,6 +144,9 @@ class ComponentFinder:
             Component 对象引用列表（可能为空）
         """
         if selector.xpath is not None:
+            direct_selector = _simple_type_xpath_selector(selector.xpath)
+            if direct_selector is not None:
+                return self.find_components(direct_selector)
             return self._find_components_by_xpath(selector)
         by_ref = self._build_by_ref(selector)
         result = self._rpc.call("Driver.findComponents", DRIVER_REF, [by_ref])
@@ -130,9 +155,12 @@ class ComponentFinder:
     def component_exists(self, selector: SelectorSpec) -> bool:
         """检查控件是否存在。
 
-        xpath 选择器直接在控件树上查询，无需构造 By 链。
+        纯类型 xpath 下推设备端查询，复杂 xpath 在控件树上即时查询。
         """
         if selector.xpath is not None:
+            direct_selector = _simple_type_xpath_selector(selector.xpath)
+            if direct_selector is not None:
+                return bool(self.find_components(direct_selector))
             return bool(self._query_xpath_nodes(selector))
         return bool(self.find_components(selector))
 
@@ -299,19 +327,9 @@ class ComponentFinder:
     def _anchor_node_to_ref(self, node: Dict[str, Any]) -> Optional[str]:
         """把 xpath 命中的控件树节点锚定回设备端 Component ref。
 
-        锚定原理（已真机验证）：captureLayout 树里的 bounds 与设备端
-        Component.getBounds 逐值相等，故用 bounds 作几何唯一键。
-
-        流程：
-            findComponents(On.type(节点.type))  → 同 type 候选 refs
-              → 逐个 getBounds 与目标 bounds 精确比对
-              → 命中即锚定；无命中返回 None
-
-        为何不走属性降级：text/id 在重复控件场景无法唯一区分，位置语义
-        （如 (//Button)[2]）在降级时丢失。bounds 是屏上唯一的几何锚点。
-
-        Returns:
-            锚定到的 Component ref；无法锚定返回 None。
+        先用节点的 type 与可用身份属性缩小设备端候选集，再以 bounds 作
+        最终唯一键。若控件树属性与设备端瞬时状态不一致，则回退到仅按
+        type 查询，避免优化影响 XPath 位置语义和兼容性。
         """
         attrs = extract_node_attributes(node)
         target_bounds = _parse_bounds_quad(attrs.get("bounds"))
@@ -320,40 +338,130 @@ class ComponentFinder:
             logger.debug("节点缺少 bounds 或 type，无法锚定: %r", attrs)
             return None
 
-        by_ref = self._build_by_ref(build_selector(type=node_type))
-        candidates = self._rpc.call(
-            "Driver.findComponents", DRIVER_REF, [by_ref]
-        )
-        if not isinstance(candidates, list):
-            return None
-        for ref in candidates:
+        selectors = [_build_anchor_selector(attrs)]
+        type_selector = build_selector(type=node_type)
+        if selectors[0] != type_selector:
+            selectors.append(type_selector)
+
+        checked_refs = set()
+        checked_count = 0
+        for anchor_selector in selectors:
             try:
-                bounds_data = self._rpc.call("Component.getBounds", ref, [])
+                by_ref = self._build_by_ref(anchor_selector)
+                candidates = self._rpc.call(
+                    "Driver.findComponents", DRIVER_REF, [by_ref]
+                )
             except RpcError:
+                if anchor_selector == type_selector:
+                    raise
+                logger.debug("XPath 属性预筛失败，回退 type 查询",
+                             exc_info=True)
                 continue
-            if _bounds_data_to_quad(bounds_data) == target_bounds:
-                return ref
-        logger.debug("bounds 锚定未命中 (type=%s bounds=%s 候选数=%d)",
-                     node_type, target_bounds, len(candidates))
+            if not isinstance(candidates, list):
+                continue
+            for ref in candidates:
+                if ref in checked_refs:
+                    continue
+                checked_count += 1
+                try:
+                    bounds_data = self._rpc.call(
+                        "Component.getBounds", ref, []
+                    )
+                except RpcError:
+                    continue
+                checked_refs.add(ref)
+                if _bounds_data_to_quad(bounds_data) == target_bounds:
+                    return ref
+
+        logger.debug("bounds 锚定未命中 (type=%s bounds=%s 已检查候选数=%d)",
+                     node_type, target_bounds, checked_count)
         return None
+
+    def _anchor_nodes_to_refs(self,
+                              nodes: List[Dict[str, Any]]) -> List[str]:
+        """批量按 type 查询候选，并按 bounds 映射回 XPath 顺序。"""
+        targets: Dict[
+            str, Dict[Tuple[int, int, int, int], List[int]]
+        ] = {}
+        resolved: List[Optional[str]] = [None] * len(nodes)
+
+        for index, node in enumerate(nodes):
+            attrs = extract_node_attributes(node)
+            node_type = attrs.get("type")
+            bounds = _parse_bounds_quad(attrs.get("bounds"))
+            if not node_type or bounds is None:
+                continue
+            targets.setdefault(str(node_type), {}).setdefault(
+                bounds, []
+            ).append(index)
+
+        for node_type, bounds_indexes in targets.items():
+            by_ref = self._build_by_ref(build_selector(type=node_type))
+            candidates = self._rpc.call(
+                "Driver.findComponents", DRIVER_REF, [by_ref]
+            )
+            if not isinstance(candidates, list):
+                continue
+            remaining_bounds = set(bounds_indexes)
+            for ref in candidates:
+                try:
+                    bounds_data = self._rpc.call(
+                        "Component.getBounds", ref, []
+                    )
+                except RpcError:
+                    continue
+                bounds = _bounds_data_to_quad(bounds_data)
+                if bounds not in remaining_bounds:
+                    continue
+                for index in bounds_indexes[bounds]:
+                    resolved[index] = ref
+                remaining_bounds.remove(bounds)
+                if not remaining_bounds:
+                    break
+
+        return [ref for ref in resolved if ref is not None]
 
     def _find_by_xpath(self, selector: SelectorSpec,
                        timeout: float) -> str:
-        """xpath 选择器查找单个控件。
+        """等待 xpath 节点出现，并通过 bounds 锚定回 Component ref。
 
-        dump 控件树 → 标准 XPath 查询 → 取首个命中节点 → bounds 锚定回 ref。
+        每轮重新采集控件树，覆盖异步渲染以及节点命中后页面更新导致的
+        bounds 锚定竞态。timeout <= 0 时仍执行一次即时查询，对齐
+        waitForComponent 的立即检查语义。
         """
-        nodes = self._query_xpath_nodes(selector)
-        if not nodes:
+        xpath = selector.xpath or ""
+        if not is_valid_xpath(xpath):
             raise ComponentNotFoundError(
-                "xpath 未匹配控件: %s" % selector.xpath
+                "xpath 表达式无效: %s" % selector.xpath
             )
-        ref = self._anchor_node_to_ref(nodes[0])
-        if ref is None:
+
+        deadline = time.monotonic() + max(timeout, 0.0)
+        interval = 0.1
+        xpath_matched = False
+        first_attempt = True
+
+        while first_attempt or time.monotonic() < deadline:
+            first_attempt = False
+            nodes = self._query_xpath_nodes(selector)
+            if nodes:
+                xpath_matched = True
+                ref = self._anchor_node_to_ref(nodes[0])
+                if ref is not None:
+                    return ref
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
+            interval = min(interval * 2, 0.5)
+
+        if xpath_matched:
             raise ComponentNotFoundError(
                 "xpath 命中节点但无法锚定到设备端控件: %s" % selector.xpath
             )
-        return ref
+        raise ComponentNotFoundError(
+            "xpath 未匹配控件: %s" % selector.xpath
+        )
 
     def _find_components_by_xpath(self, selector: SelectorSpec) -> list:
         """xpath 选择器查找所有匹配控件。
@@ -362,12 +470,7 @@ class ComponentFinder:
         bounds 唯一，天然去重，无需按降级条件合并。
         """
         nodes = self._query_xpath_nodes(selector)
-        refs: list = []
-        for node in nodes:
-            ref = self._anchor_node_to_ref(node)
-            if ref is not None:
-                refs.append(ref)
-        return refs
+        return self._anchor_nodes_to_refs(nodes)
 
     # ============================================================
     # 弹窗处理
@@ -381,6 +484,41 @@ class ComponentFinder:
 _BOUNDS_STR_RE = re.compile(r'\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]')
 
 BoundsQuad = Tuple[int, int, int, int]  # (left, top, right, bottom)
+
+
+def _build_anchor_selector(attrs: Dict[str, Any]) -> SelectorSpec:
+    """用控件树中的稳定属性构造候选预筛选器。"""
+    kwargs: Dict[str, str] = {"type": str(attrs.get("type"))}
+
+    text = _nonempty_attr(attrs, "text")
+    if text is not None:
+        kwargs["text"] = text
+
+    description = _nonempty_attr(attrs, "description")
+    if description is not None:
+        kwargs["desc"] = description
+
+    key = _nonempty_attr(attrs, "key")
+    resource_id = (
+        _nonempty_attr(attrs, "id")
+        or _nonempty_attr(attrs, "resourceId")
+        or _nonempty_attr(attrs, "resource-id")
+    )
+    if key is not None:
+        kwargs["key"] = key
+    elif resource_id is not None:
+        kwargs["resource_id"] = resource_id
+
+    return build_selector(**kwargs)
+
+
+def _nonempty_attr(attrs: Dict[str, Any], name: str) -> Optional[str]:
+    """读取可用于设备端精确匹配的非空字符串属性。"""
+    value = attrs.get(name)
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
 
 
 def _parse_bounds_quad(raw: Any) -> Optional[BoundsQuad]:
