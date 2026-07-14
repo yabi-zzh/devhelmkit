@@ -129,6 +129,18 @@ class SessionState:
         return result
 
 
+def extract_hierarchy_attributes(node: Dict[str, Any]) -> Dict[str, Any]:
+    """提取节点属性，并从顶层属性结构中排除树结构字段。"""
+    wrapped = node.get("attributes")
+    if isinstance(wrapped, dict):
+        return wrapped
+    return {
+        key: value
+        for key, value in node.items()
+        if key != "children"
+    }
+
+
 def flatten_hierarchy(root: Dict[str, Any],
                       parent_id: Optional[str] = None,
                       path_prefix: str = "") -> Dict[str, Dict[str, Any]]:
@@ -145,7 +157,7 @@ def flatten_hierarchy(root: Dict[str, Any],
             idx = len(siblings)
         node_id = "%s%d" % (prefix, idx) if prefix else "root"
 
-        attrs = node.get("attributes", node)
+        attrs = extract_hierarchy_attributes(node)
         children_raw = node.get("children", [])
 
         flat_node: Dict[str, Any] = {

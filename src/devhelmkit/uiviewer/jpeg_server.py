@@ -29,9 +29,11 @@ class JpegRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format, *args):
+        """将 HTTP 访问日志降到 debug，避免 MJPEG 和快照请求刷屏。"""
         logger.debug("jpeg_server %s - %s", self.address_string(), format % args)
 
     def do_GET(self):
+        """分发快照图片与 MJPEG 实时流请求。"""
         parsed = urlparse(self.path)
         path = parsed.path
         params = parse_qs(parsed.query)
@@ -44,6 +46,7 @@ class JpegRequestHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
     def _handle_snapshot(self, params: dict):
+        """返回 snapshot 模式指定帧的 JPEG 数据。"""
         serial = params.get("serial", [None])[0]
         if not serial:
             self._json_error(400, "missing serial")
@@ -69,7 +72,7 @@ class JpegRequestHandler(BaseHTTPRequestHandler):
 
         try:
             if frame_id is None:
-                jpeg_bytes, meta = session.capture_jpeg()
+                jpeg_bytes, _ = session.capture_jpeg()
             else:
                 jpeg_bytes = session.get_cached_jpeg(frame_id)
                 if jpeg_bytes is None:
@@ -88,6 +91,7 @@ class JpegRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(jpeg_bytes)
 
     def _handle_mjpeg(self, params: dict):
+        """按帧序号阻塞推送 MJPEG，并用低频心跳探测静止画面断连。"""
         serial = params.get("serial", [None])[0]
         if not serial:
             self._json_error(400, "missing serial")
@@ -109,7 +113,7 @@ class JpegRequestHandler(BaseHTTPRequestHandler):
 
         try:
             last_seq = -1
-            idle_count = 0
+            last_frame_ts = time.time()
             meter = perf.RateMeter("mjpeg[%s]" % serial)
             t_write0 = 0.0
             while True:
@@ -118,11 +122,16 @@ class JpegRequestHandler(BaseHTTPRequestHandler):
                     break
                 if current_session.mode != CaptureMode.LIVE:
                     break
-                seq, frame = current_session.get_stream_frame_seq()
-                # 仅在帧变化时推送，避免静止画面重复编码/传输
+                # 阻塞等待新帧：帧到即返回，无新帧则 1s 后返回做心跳。
+                # 消除固定轮询延迟，帧到即推。
+                seq, frame = current_session.wait_stream_frame_seq(last_seq, 1.0)
                 if frame is not None and seq != last_seq:
+                    seq_skipped = (
+                        max(seq - last_seq - 1, 0) if last_seq >= 0 else 0
+                    )
                     last_seq = seq
-                    idle_count = 0
+                    last_frame_ts = time.time()
+                    # 低比例帧在服务端严格保持字节不变；有效区域由浏览器布局层裁剪。
                     header = (
                         "\r\n--%s\r\n"
                         "Content-Type: image/jpeg\r\n"
@@ -135,21 +144,19 @@ class JpegRequestHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                     if perf.enabled():
                         write_ms = perf.now_ms() - t_write0
-                        meter.tick(len(frame))
+                        meter.tick(len(frame), skipped=seq_skipped)
                         # 单帧 socket 写入超过阈值时单独告警（可能是浏览器/网络背压）
                         if write_ms > 20.0:
                             perf.log("[perf] mjpeg slow write: %.1fms size=%.1fKB",
                                      write_ms, len(frame) / 1024.0)
-                else:
-                    # 长时间无新帧时定期发送空白注释行做心跳，探测断连
-                    idle_count += 1
-                    if idle_count >= 300:  # ~5s 无新帧
-                        idle_count = 0
-                        self.wfile.write(b"\r\n")
-                        self.wfile.flush()
-                time.sleep(0.016)  # ~60fps 轮询上限
+                elif time.time() - last_frame_ts >= 5.0:
+                    # 长时间无新帧时发送空白注释行做心跳，探测断连
+                    last_frame_ts = time.time()
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
-            pass
+            # 浏览器关闭或切换 MJPEG 地址属于正常的流生命周期。
+            return
         except Exception as e:
             logger.warning("mjpeg 流中断: %s", e)
 

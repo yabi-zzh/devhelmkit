@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import random
 import threading
 import time
+from collections import deque
 from typing import Any, Dict, Optional, Tuple
 
 from PIL import Image
@@ -24,7 +26,11 @@ from devhelmkit.uiviewer.protocol import (
     TouchEventType,
     flatten_hierarchy,
 )
-from devhelmkit.uiviewer import perf
+from devhelmkit.uiviewer.recorder import (
+    generate_action_code,
+    generate_key_code,
+    generate_selector,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +42,54 @@ def _encode_jpeg(img: 'Image.Image') -> Tuple[bytes, Tuple[int, int]]:
     return buf.getvalue(), img.size
 
 
+def _normalize_recording_params(action: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """校验并归一化录制事件，避免无效输入生成可执行脚本。"""
+    normalized = dict(params)
+    if action == "key":
+        key = str(params.get("key", ""))
+        if key not in {"back", "home", "recent"}:
+            raise RuntimeError("不支持的录制按键: %s" % key)
+        normalized["key"] = key
+        return normalized
+
+    required_coordinates = ["x", "y"]
+    if action == "swipe":
+        required_coordinates.extend(["ex", "ey"])
+    for name in required_coordinates:
+        if name not in params:
+            raise RuntimeError("录制动作缺少坐标: %s" % name)
+        try:
+            value = int(params[name])
+        except (TypeError, ValueError):
+            raise RuntimeError("录制动作坐标必须是整数: %s" % name)
+        if value < 0:
+            raise RuntimeError("录制动作坐标不能为负数: %s" % name)
+        normalized[name] = value
+
+    snapshot_id = params.get("snapshot_id")
+    if snapshot_id is not None:
+        try:
+            normalized["snapshot_id"] = int(snapshot_id)
+        except (TypeError, ValueError):
+            raise RuntimeError("snapshot_id 必须是整数")
+
+    if action in {"long_click", "swipe"} and "duration" in params:
+        try:
+            duration = float(params["duration"])
+        except (TypeError, ValueError):
+            raise RuntimeError("录制动作 duration 必须是数字")
+        if not math.isfinite(duration) or duration <= 0:
+            raise RuntimeError("录制动作 duration 必须是有限正数")
+        normalized["duration"] = duration
+
+    if action == "input":
+        if "text" not in params:
+            raise RuntimeError("输入动作缺少 text")
+        normalized["text"] = str(params["text"])
+
+    return normalized
+
+
 class UiViewerSession:
     """单设备会话。
 
@@ -43,6 +97,7 @@ class UiViewerSession:
     """
 
     def __init__(self, serial: str):
+        """初始化会话状态；设备资源由 start() 延迟创建。"""
         self._serial = serial
         self._mode = CaptureMode.SNAPSHOT
         self._cleanup_policy = CleanupPolicy.KEEP
@@ -56,25 +111,35 @@ class UiViewerSession:
         self._last_jpeg_bytes: Optional[bytes] = None
         self._last_frame_meta: Optional[FrameMeta] = None
         self._last_hierarchy: Optional[HierarchySnapshot] = None
+        self._hierarchy_history = deque(maxlen=8)
+        self._recording = False
+        self._recording_events: list = []
+        self._recording_event_counter = 0
+        self._recording_error: Optional[str] = None
 
     @property
     def serial(self) -> str:
+        """返回会话绑定的设备序列号。"""
         return self._serial
 
     @property
     def mode(self) -> CaptureMode:
+        """返回当前截图采集模式。"""
         return self._mode
 
     @property
     def cleanup_policy(self) -> CleanupPolicy:
+        """返回会话关闭时的设备端清理策略。"""
         return self._cleanup_policy
 
     @property
     def active(self) -> bool:
+        """返回会话是否已完成设备资源初始化。"""
         return self._active
 
     @property
     def display_size(self) -> Optional[Tuple[int, int]]:
+        """返回设备显示尺寸；读取失败时为 None。"""
         return self._display_size
 
     # ============================================================
@@ -89,11 +154,16 @@ class UiViewerSession:
             from devhelmkit.harmony.config import HarmonyDriverConfig, ScreenshotMode
             config = HarmonyDriverConfig(
                 screenshot_mode=ScreenshotMode.HDC,
+                screenshot_stream_scale=0.5,
                 stop_daemon_on_close=False,
             )
             from devhelmkit.harmony.driver import HarmonyDriver
             self._driver = HarmonyDriver(self._serial, config=config)
             self._active = True
+            try:
+                self._driver.screen_on()
+            except Exception as e:
+                logger.warning("Session 启动时触发设备亮屏异常: %s", e)
             try:
                 self._display_size = self._driver.get_display_size()
             except Exception as e:
@@ -104,6 +174,7 @@ class UiViewerSession:
         """释放本会话资源。"""
         with self._lock:
             self._active = False
+            self._stop_recording_locked()
             if self._driver is None:
                 return
             stop_daemon = (
@@ -117,9 +188,123 @@ class UiViewerSession:
             self._driver = None
             self._used_live_capability = False
 
-    # ============================================================
-    # 模式切换
-    # ============================================================
+    def start_recording(self) -> None:
+        """开始收集 Viewer 自己发出的操作，不启动设备端录制通道。"""
+        with self._lock:
+            if self._driver is None:
+                raise RuntimeError("会话未启动")
+            if self._mode != CaptureMode.LIVE:
+                raise RuntimeError("脚本录制需要先开启实时投屏")
+            if self._recording:
+                raise RuntimeError("脚本录制已在进行中")
+            self._recording = True
+            self._recording_events = []
+            self._recording_event_counter = 0
+            self._recording_error = None
+            logger.info("Web 操作录制已启动: %s", self._serial)
+
+    def stop_recording(self) -> Dict[str, Any]:
+        """停止收集 Web 操作并返回已生成的脚本事件。"""
+        with self._lock:
+            self._recording = False
+            events = list(self._recording_events)
+            error = self._recording_error
+            logger.info("Web 操作录制已停止: %s, events=%d", self._serial, len(events))
+            return {"recording": False, "events": events, "error": error}
+
+    def get_recording_state(self) -> Dict[str, Any]:
+        """返回 Web 操作录制状态。"""
+        with self._lock:
+            return {
+                "recording": self._recording,
+                "events": list(self._recording_events),
+                "error": self._recording_error,
+            }
+
+    def delete_recording_event(self, event_id: int) -> Dict[str, Any]:
+        """按稳定事件 ID 删除录制脚本；不存在时拒绝静默错删。"""
+        with self._lock:
+            for index, event in enumerate(self._recording_events):
+                if event.get("event_id") == event_id:
+                    deleted = self._recording_events.pop(index)
+                    return {
+                        "deleted": True,
+                        "event": deleted,
+                        "events": list(self._recording_events),
+                    }
+            raise RuntimeError("录制事件不存在: %s" % event_id)
+
+    def clear_recording_events(self) -> Dict[str, Any]:
+        """清空当前会话的录制脚本，保留录制开关状态。"""
+        with self._lock:
+            deleted_count = len(self._recording_events)
+            self._recording_events = []
+            return {
+                "cleared": True,
+                "deleted_count": deleted_count,
+                "events": [],
+            }
+
+    def record_web_action(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """记录一条 Viewer 操作，并基于对应 hierarchy 生成脚本。"""
+        with self._lock:
+            if not self._recording:
+                return {"recorded": False, "reason": "录制未启动"}
+            try:
+                if action not in {"click", "long_click", "double_click", "swipe", "input", "key"}:
+                    raise RuntimeError("不支持的录制动作: %s" % action)
+                normalized_params = _normalize_recording_params(action, params)
+                event = self._build_recording_event_locked(action, normalized_params)
+            except Exception as exc:
+                # 状态接口保留最近一次生成错误，使异步前端轮询仍能展示失败原因。
+                self._recording_error = str(exc)
+                raise
+            self._recording_events.append(event)
+            self._recording_error = None
+            return {"recorded": True, "event": event}
+
+    def _build_recording_event_locked(self, action: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """在持有会话锁时绑定事件 ID、快照和最终脚本。"""
+        self._recording_event_counter += 1
+        event: Dict[str, Any] = {
+            "event_id": self._recording_event_counter,
+            "action": action,
+            "timestamp_ms": int(time.time() * 1000),
+            "params": dict(params),
+        }
+        if action == "key":
+            # 导航键本身具备稳定语义，不绑定页面快照或控件节点。
+            key = str(params.get("key", ""))
+            event["code"] = generate_key_code(key)
+            return event
+        x = int(params.get("x", 0))
+        y = int(params.get("y", 0))
+        snapshot_id = params.get("snapshot_id")
+        snapshot = next((item for item in reversed(self._hierarchy_history)
+                         if item.snapshot_id == snapshot_id), None)
+        if snapshot is None:
+            # 快照缺失时禁止使用后续页面反推控件，直接保留操作时坐标。
+            event["code"] = generate_action_code(None, action, params, x, y)
+            event["selector_confidence"] = "coordinate"
+            return event
+        event["snapshot_id"] = snapshot.snapshot_id
+        if action == "swipe":
+            event["node_id"] = None
+            event["selector_confidence"] = "coordinate"
+            event["code"] = generate_action_code(None, action, params, x, y)
+            return event
+
+        selector, target = generate_selector(snapshot.root, x, y, action=action)
+        event["node_id"] = target.node_id if target else None
+        event["selector_confidence"] = "selector" if selector else "coordinate"
+        event["code"] = generate_action_code(selector, action, params, x, y)
+        return event
+
+    def _stop_recording_locked(self) -> None:
+        """会话关闭时终止录制并释放仅属于该会话的脚本状态。"""
+        self._recording = False
+        self._recording_events = []
+        self._recording_error = None
 
     def set_mode(self, mode: CaptureMode) -> None:
         """切换采集模式。
@@ -132,6 +317,10 @@ class UiViewerSession:
                 return
             if self._driver is not None:
                 if mode == CaptureMode.LIVE:
+                    try:
+                        self._driver.screen_on()
+                    except Exception as e:
+                        logger.warning("切换至实时模式触发设备亮屏异常: %s", e)
                     self._warmup_stream_locked()
                 else:
                     self._stop_stream_locked()
@@ -141,6 +330,7 @@ class UiViewerSession:
             self._last_hierarchy = None
 
     def set_cleanup_policy(self, policy: CleanupPolicy) -> None:
+        """更新会话关闭时是否停止设备端实时能力的策略。"""
         with self._lock:
             self._cleanup_policy = policy
 
@@ -199,33 +389,19 @@ class UiViewerSession:
         )
         return jpeg_bytes, meta
 
-    def get_stream_frame(self) -> Optional[bytes]:
-        """获取截图流当前帧的原始 JPEG bytes，无帧时返回 None。
+    def wait_stream_frame_seq(self, last_seq: int,
+                              timeout: float) -> Tuple[int, Optional[bytes]]:
+        """阻塞等待比 last_seq 更新的截图流帧，返回 (帧序号, 当前帧 bytes)。
 
-        仅供 MJPEG 服务轮询使用，走无锁快路径（见 get_stream_frame_seq 说明）。
+        MJPEG 高频消费路径不持有会话锁，底层 ScreenshotStream 使用条件变量
+        保护帧缓存；并发 stop() 或模式切换最多返回 (0, None)，属于可重试降级。
         """
+        # 原子快照避免读取期间 stop() 将会话 driver 置空。
         driver = self._driver
-        if driver is None or self._mode != CaptureMode.LIVE:
-            return None
-        self._used_live_capability = True
-        return driver.get_screenshot_stream_frame_bytes()
-
-    def get_stream_frame_seq(self) -> Tuple[int, Optional[bytes]]:
-        """获取截图流 (帧序号, 当前帧 bytes)，非 live 或未启动返回 (0, None)。
-
-        序号单调递增，供 MJPEG 服务按帧变化去重，避免重复推送同一帧。
-
-        无锁快路径：MJPEG 循环每秒高频调用此方法，若持 self._lock 会与 touch
-        争锁（实测 lock_wait 可达数十毫秒，导致拖动发涩）。本方法只做只读访问——
-        依赖 GIL 保证 self._driver / self._mode 的原子读取，底层帧缓存由
-        ScreenshotStream 自己的 _frame_lock 保护，故无需 session 级锁。
-        并发 stop()/set_mode() 时最坏返回 (0, None)，对 MJPEG 是良性降级。
-        """
-        driver = self._driver  # 原子快照，避免与 stop() 置 None 竞争
         if driver is None or self._mode != CaptureMode.LIVE:
             return 0, None
         self._used_live_capability = True
-        return driver.get_screenshot_stream_frame_bytes_seq()
+        return driver.wait_screenshot_stream_frame_bytes_seq(last_seq, timeout)
 
     def refresh_live_frame(self) -> bool:
         """实时模式下触发一次画面刷新，让 MJPEG 立即更新一帧。
@@ -293,7 +469,13 @@ class UiViewerSession:
                 nodes=nodes,
             )
             self._last_hierarchy = snapshot
+            self._hierarchy_history.append(snapshot)
             return snapshot
+
+    def get_cached_hierarchy(self) -> Optional[HierarchySnapshot]:
+        """读取最近一次控件树快照，不触发设备重新 dump。"""
+        with self._lock:
+            return self._last_hierarchy
 
     # ============================================================
     # 触控
@@ -305,41 +487,25 @@ class UiViewerSession:
         仅 live 模式可用；snapshot 模式调用会抛异常。
         前端需按 down/move/up 顺序串行提交，本方法不做跨调用排序保证。
         """
-        t_enter = perf.now_ms() if perf.enabled() else 0.0
         with self._lock:
             if self._driver is None:
                 raise RuntimeError("会话未启动")
             if self._mode != CaptureMode.LIVE:
                 raise RuntimeError("snapshot 模式不支持触控操作")
             self._used_live_capability = True
-
-            perf_on = perf.enabled()
-            t_start = perf.now_ms() if perf_on else 0.0
-            lock_wait = (t_start - t_enter) if perf_on else 0.0
-            rpc_total = 0.0
-            for ev in events:
+            for event in events:
                 try:
-                    event_type = TouchEventType(ev.get("type", ""))
+                    event_type = TouchEventType(event.get("type", ""))
                 except ValueError:
-                    raise RuntimeError("未知 touch 事件类型: %s" % ev.get("type"))
-                x, y = self._normalize_touch_point(ev)
-                t_rpc = perf.now_ms() if perf_on else 0.0
+                    raise RuntimeError("未知 touch 事件类型: %s" % event.get("type"))
+                x, y = self._normalize_touch_point(event)
+                event["x"], event["y"] = x, y
                 if event_type == TouchEventType.DOWN:
                     self._driver.touch_down(x, y)
                 elif event_type == TouchEventType.MOVE:
                     self._driver.touch_move(x, y)
                 elif event_type == TouchEventType.UP:
                     self._driver.touch_up(x, y)
-                if perf_on:
-                    dt = perf.now_ms() - t_rpc
-                    rpc_total += dt
-                    perf.log("[perf] touch rpc %s (%d,%d) %.1fms",
-                             event_type.value, x, y, dt)
-            if perf_on:
-                total = perf.now_ms() - t_start
-                perf.log("[perf] touch batch: events=%d lock_wait=%.1fms "
-                         "rpc_sum=%.1fms total=%.1fms",
-                         len(events), lock_wait, rpc_total, total)
 
     # ============================================================
     # 设备按键
@@ -419,6 +585,7 @@ class UiViewerSession:
                 "mode": self._mode.value,
                 "cleanup_policy": self._cleanup_policy.value,
                 "active": self._active,
+                "recording": self._recording,
                 "display_size": list(self._display_size) if self._display_size else None,
             }
             if self._last_frame_meta is not None:

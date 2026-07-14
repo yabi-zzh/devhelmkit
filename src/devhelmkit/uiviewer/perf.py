@@ -2,13 +2,12 @@
 # -*- coding: utf-8 -*-
 """UIViewer 性能排查日志工具。
 
-默认关闭，避免高频 touch/MJPEG 刷屏。通过环境变量开启：
+默认关闭，避免高频 MJPEG 和截图采集日志刷屏。通过环境变量开启：
     DEVHELM_UIVIEWER_PERF=1    # 开启性能日志（INFO 级别单独输出）
 
 设计目标：
-- 触控链路：每次 touch 请求的事件数、每类 RPC 耗时、总耗时
-- MJPEG 推流：周期性统计实际 fps、平均帧大小、平均帧间隔
-- 截图采集：设备到帧的端到端延迟
+- MJPEG 推流：周期性统计实际 fps、平均帧大小、平均帧间隔和跳帧数量
+- 截图采集：由采集模块统计设备到帧的端到端延迟
 所有埋点在关闭时是接近零开销的早返回。
 """
 from __future__ import annotations
@@ -58,6 +57,7 @@ class RateMeter:
 
     def __init__(self, name: str, window: int = 60,
                  interval_s: float = 2.0):
+        """初始化按样本数或时间窗口触发的聚合统计。"""
         self._name = name
         self._window = window
         self._interval_s = interval_s
@@ -66,10 +66,13 @@ class RateMeter:
         self._last_ts: Optional[float] = None
         self._gap_total = 0.0
         self._gap_max = 0.0
+        self._skipped_total = 0
+        self._skip_events = 0
+        self._skip_max = 0
         self._period_start = time.perf_counter()
 
-    def tick(self, frame_bytes: int = 0) -> None:
-        """记录一次事件（如推送一帧）；到达窗口时输出聚合统计。"""
+    def tick(self, frame_bytes: int = 0, skipped: int = 0) -> None:
+        """记录一次事件，并聚合该事件前被覆盖或跳过的数量。"""
         if not _ENABLED:
             return
         t = time.perf_counter()
@@ -81,12 +84,17 @@ class RateMeter:
         self._last_ts = t
         self._count += 1
         self._bytes_total += frame_bytes
+        if skipped > 0:
+            self._skipped_total += skipped
+            self._skip_events += 1
+            self._skip_max = max(self._skip_max, skipped)
 
         elapsed = t - self._period_start
         if self._count >= self._window or elapsed >= self._interval_s:
             self._flush(elapsed)
 
     def _flush(self, elapsed: float) -> None:
+        """输出当前窗口的速率、延迟、帧大小和跳帧聚合。"""
         if self._count == 0 or elapsed <= 0:
             self._reset()
             return
@@ -94,15 +102,21 @@ class RateMeter:
         avg_gap = self._gap_total / max(self._count - 1, 1)
         avg_kb = (self._bytes_total / self._count) / 1024.0
         logger.info(
-            "[perf] %s: fps=%.1f frames=%d avg_gap=%.1fms max_gap=%.1fms avg_size=%.1fKB",
+            "[perf] %s: fps=%.1f frames=%d avg_gap=%.1fms max_gap=%.1fms "
+            "avg_size=%.1fKB seq_skipped=%d skip_events=%d max_skip=%d",
             self._name, fps, self._count, avg_gap, self._gap_max, avg_kb,
+            self._skipped_total, self._skip_events, self._skip_max,
         )
         self._reset()
 
     def _reset(self) -> None:
+        """清空当前窗口计数，并保留跨窗口帧间隔基准。"""
         self._count = 0
         self._bytes_total = 0
         self._gap_total = 0.0
         self._gap_max = 0.0
+        self._skipped_total = 0
+        self._skip_events = 0
+        self._skip_max = 0
         self._period_start = time.perf_counter()
         # 保留 _last_ts 以连续测量帧间隔

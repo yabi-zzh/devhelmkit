@@ -29,7 +29,10 @@ from devhelmkit.harmony.finder.selector_adapter import (
     RELATION_API,
     selector_to_by_chain,
 )
-from devhelmkit.harmony.finder.xpath_query import query_xpath
+from devhelmkit.harmony.finder.xpath_query import (
+    extract_node_attributes,
+    query_xpath,
+)
 from devhelmkit.harmony.finder.popup_handler import PopupHandler
 from devhelmkit.harmony.rpc.proxy_v2 import rpc_captures
 
@@ -51,6 +54,7 @@ class ComponentFinder:
     """鸿蒙控件查找门面，统一对接设备端 uitest 服务。"""
 
     def __init__(self, rpc: 'RpcClient', config: 'HarmonyDriverConfig'):
+        """初始化 RPC 客户端、运行配置和弹窗处理器。"""
         self._rpc = rpc
         self._config = config
         self._popup_handler = PopupHandler(
@@ -218,7 +222,7 @@ class ComponentFinder:
             node = _match_node_in_tree(tree, selector)
         if node is None:
             return None
-        attrs = node.get("attributes") or {}
+        attrs = extract_node_attributes(node)
         return _extract_properties_from_attrs(attrs)
 
     # ============================================================
@@ -256,7 +260,7 @@ class ComponentFinder:
     # ============================================================
     # xpath 客户端查询
     # 设备端 uitest 不支持 xpath，通过 Captures.captureLayout 获取控件树
-    # JSON 后，在客户端执行标准 XPath（见 xpath_query），再将命中节点用
+    # JSON 响应在客户端执行标准 XPath，再将命中节点用
     # bounds 精确锚定回设备端 Component ref，复用 Component 引用机制。
     # ============================================================
 
@@ -309,7 +313,7 @@ class ComponentFinder:
         Returns:
             锚定到的 Component ref；无法锚定返回 None。
         """
-        attrs = node.get("attributes") or {}
+        attrs = extract_node_attributes(node)
         target_bounds = _parse_bounds_quad(attrs.get("bounds"))
         node_type = attrs.get("type")
         if target_bounds is None or not node_type:
@@ -380,14 +384,26 @@ BoundsQuad = Tuple[int, int, int, int]  # (left, top, right, bottom)
 
 
 def _parse_bounds_quad(raw: Any) -> Optional[BoundsQuad]:
-    """解析控件树里的 bounds 字符串 "[l,t][r,b]" 为四元组。"""
-    if not isinstance(raw, str):
-        return None
-    m = _BOUNDS_STR_RE.search(raw)
-    if not m:
-        return None
-    return (int(m.group(1)), int(m.group(2)),
-            int(m.group(3)), int(m.group(4)))
+    """解析控件树里的 bounds 为四元组。"""
+    if isinstance(raw, str):
+        m = _BOUNDS_STR_RE.search(raw)
+        if not m:
+            return None
+        return (int(m.group(1)), int(m.group(2)),
+                int(m.group(3)), int(m.group(4)))
+    if isinstance(raw, dict):
+        try:
+            return (int(raw["left"]), int(raw["top"]),
+                    int(raw["right"]), int(raw["bottom"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+    if isinstance(raw, (list, tuple)) and len(raw) >= 4:
+        try:
+            return (int(raw[0]), int(raw[1]),
+                    int(raw[2]), int(raw[3]))
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _bounds_data_to_quad(data: Any) -> Optional[BoundsQuad]:
@@ -443,7 +459,7 @@ def _match_node_in_tree(tree: Dict[str, Any],
 def _traverse_match(node: Dict[str, Any], selector: SelectorSpec,
                     results: List[Dict[str, Any]]) -> None:
     """深度优先遍历，收集匹配 selector 的节点。"""
-    attrs = node.get("attributes") or {}
+    attrs = extract_node_attributes(node)
     if _node_matches_selector(attrs, selector):
         results.append(node)
         return
@@ -489,17 +505,16 @@ def _node_matches_selector(attrs: Dict[str, Any], selector: SelectorSpec) -> boo
 def _extract_properties_from_attrs(attrs: Dict[str, Any]) -> Dict[str, Any]:
     """从控件树节点的 attributes 中提取全部属性，对齐 RPC 逐个获取的结果。"""
     def _bool(val: str) -> bool:
+        """将设备端布尔文本转换为 Python bool。"""
         return str(val).lower() == "true"
 
-    def _bounds(val: str) -> Dict[str, int]:
-        """解析 "[left,top][right,bottom]" 格式。"""
-        m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', val or "")
-        if m:
-            return {
-                "left": int(m.group(1)), "top": int(m.group(2)),
-                "right": int(m.group(3)), "bottom": int(m.group(4)),
-            }
-        return {"left": 0, "top": 0, "right": 0, "bottom": 0}
+    def _bounds(val: Any) -> Dict[str, int]:
+        """解析控件树 bounds 为统一字典。"""
+        quad = _parse_bounds_quad(val)
+        if quad is None:
+            return {"left": 0, "top": 0, "right": 0, "bottom": 0}
+        left, top, right, bottom = quad
+        return {"left": left, "top": top, "right": right, "bottom": bottom}
 
     return {
         "text": attrs.get("text", ""),

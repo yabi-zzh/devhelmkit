@@ -16,7 +16,7 @@
    对底层 C 节点的按需代理，构建期的 Python 包装被回收后其 id 会被 CPython
    复用，与查询时新生成的包装对象对不上（实测 //Text 全 miss）。改为构建时
    将原始节点按序存入列表，并把列表下标写入 element 的专属属性
-   （见 _DHK_IDX_ATTR），命中后据此取回原始节点。
+   （通过内部索引属性保存节点位置），命中后据此取回原始节点。
 """
 import logging
 import re
@@ -86,13 +86,25 @@ def _json_to_etree(
     return root, node_list
 
 
+def extract_node_attributes(node: Dict[str, Any]) -> Dict[str, Any]:
+    """提取控件节点属性，兼容 attributes 包裹和顶层属性两种树结构。"""
+    wrapped = node.get("attributes")
+    if isinstance(wrapped, dict):
+        return wrapped
+    return {
+        key: value
+        for key, value in node.items()
+        if key != "children"
+    }
+
+
 def _build_element(node: Dict[str, Any],
                    node_list: List[Dict[str, Any]]) -> etree._Element:
     """递归构建单个 element：type 作 tag，其余 attributes 作属性。
 
     把原始节点追加进 node_list，并把其下标写入 element 的专属回指属性。
     """
-    attrs = node.get("attributes") or {}
+    attrs = extract_node_attributes(node)
     tag = _safe_tag(attrs.get("type"))
     clean = _sanitize_attrs(attrs)
     idx = len(node_list)

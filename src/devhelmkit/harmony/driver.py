@@ -738,6 +738,18 @@ class HarmonyDriver(BaseDriver):
             return 0, None
         return stream.get_frame_bytes_seq()
 
+    def wait_screenshot_stream_frame_bytes_seq(
+            self, last_seq: int, timeout: float) -> Tuple[int, Optional[bytes]]:
+        """阻塞等待比 last_seq 更新的推流帧，返回 (帧序号, 当前帧 bytes)。
+
+        帧到即返回，供 MJPEG 直推消除固定轮询延迟；未启动返回 (0, None)。
+        无锁调用：先原子快照 stream 引用，避免检查后被置 None 的竞态。
+        """
+        stream = self._screenshot_stream
+        if stream is None:
+            return 0, None
+        return stream.wait_frame_bytes_seq(last_seq, timeout)
+
     def stop_screenshot_stream(self) -> None:
         """停止截图推流通道。"""
         self._stop_screenshot_stream()

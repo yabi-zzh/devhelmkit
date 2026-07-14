@@ -74,15 +74,135 @@ MAX_FRAME_GAP = 0.5
 # 单帧最大字节数：超过此限制仍未找到帧尾时，丢弃已累积数据防止缓冲区无限增长
 MAX_FRAME_SIZE = 10 * 1024 * 1024
 
+# UITest 协议体上限及性能日志聚合周期
+MAX_PROTOCOL_BODY_SIZE = 4 * 1024 * 1024
+PERF_LOG_INTERVAL = 2.0
+
+
+class _CaptureDiagnostics:
+    """采集 socket 与分帧器的低开销周期聚合统计。"""
+
+    def __init__(self) -> None:
+        """初始化一个新的聚合周期。"""
+        self.reset()
+
+    def reset(self) -> None:
+        """清空周期计数，同时重新建立统计起点。"""
+        self.period_start = time.perf_counter()
+        self.last_recv_ts: Optional[float] = None
+        self.recv_chunks = 0
+        self.recv_bytes = 0
+        self.recv_wait_total_ms = 0.0
+        self.recv_wait_max_ms = 0.0
+        self.recv_interval_max_ms = 0.0
+        self.buffer_peak = 0
+        self.parse_calls = 0
+        self.parse_total_ms = 0.0
+        self.parse_max_ms = 0.0
+        self.protocol_frames = 0
+        self.protocol_jpegs = 0
+        self.protocol_other = 0
+        self.raw_jpegs = 0
+        self.protocol_waits = 0
+        self.raw_waits = 0
+        self.invalid_lengths = 0
+        self.invalid_tails = 0
+        self.raw_oversized = 0
+        self.resync_events = 0
+        self.discarded_bytes = 0
+
+    def record_recv(self, wait_ms: float, chunk_bytes: int,
+                    buffer_size: int, recv_ts: float) -> None:
+        """聚合一次 socket 接收的等待、字节和缓冲区水位。"""
+        if self.last_recv_ts is not None:
+            interval_ms = (recv_ts - self.last_recv_ts) * 1000.0
+            self.recv_interval_max_ms = max(
+                self.recv_interval_max_ms, interval_ms
+            )
+        self.last_recv_ts = recv_ts
+        self.recv_chunks += 1
+        self.recv_bytes += chunk_bytes
+        self.recv_wait_total_ms += wait_ms
+        self.recv_wait_max_ms = max(self.recv_wait_max_ms, wait_ms)
+        self.buffer_peak = max(self.buffer_peak, buffer_size)
+
+    def record_parse(self, elapsed_ms: float, buffer_size: int) -> None:
+        """聚合一次分帧解析耗时和解析后的缓冲区水位。"""
+        self.parse_calls += 1
+        self.parse_total_ms += elapsed_ms
+        self.parse_max_ms = max(self.parse_max_ms, elapsed_ms)
+        self.buffer_peak = max(self.buffer_peak, buffer_size)
+
+    def record_discard(self, byte_count: int) -> None:
+        """统计为恢复帧边界而丢弃的有效字节数。"""
+        if byte_count <= 0:
+            return
+        self.resync_events += 1
+        self.discarded_bytes += byte_count
+
+    def maybe_log(self, buffer_size: int, force: bool = False) -> None:
+        """达到聚合周期后输出统计；force 用于线程退出前刷新残余样本。"""
+        now = time.perf_counter()
+        elapsed = now - self.period_start
+        if not force and elapsed < PERF_LOG_INTERVAL:
+            return
+        if self.recv_chunks == 0 and self.parse_calls == 0:
+            self.period_start = now
+            return
+
+        avg_chunk_kb = (
+            self.recv_bytes / max(self.recv_chunks, 1) / 1024.0
+        )
+        avg_wait_ms = self.recv_wait_total_ms / max(self.recv_chunks, 1)
+        logger.info(
+            "[perf] capture-io: recv=%.1f/s chunks=%d bytes=%.1fKB "
+            "avg_chunk=%.1fKB avg_wait=%.1fms max_wait=%.1fms "
+            "max_interval=%.1fms buffer=%dB peak=%dB",
+            self.recv_chunks / max(elapsed, 0.001),
+            self.recv_chunks,
+            self.recv_bytes / 1024.0,
+            avg_chunk_kb,
+            avg_wait_ms,
+            self.recv_wait_max_ms,
+            self.recv_interval_max_ms,
+            buffer_size,
+            self.buffer_peak,
+        )
+        logger.info(
+            "[perf] capture-parse: calls=%d total=%.2fms max=%.2fms "
+            "protocol=%d(jpeg=%d other=%d wait=%d) "
+            "raw_jpeg=%d raw_wait=%d invalid_len=%d invalid_tail=%d "
+            "raw_oversized=%d resync=%d discarded=%dB",
+            self.parse_calls,
+            self.parse_total_ms,
+            self.parse_max_ms,
+            self.protocol_frames,
+            self.protocol_jpegs,
+            self.protocol_other,
+            self.protocol_waits,
+            self.raw_jpegs,
+            self.raw_waits,
+            self.invalid_lengths,
+            self.invalid_tails,
+            self.raw_oversized,
+            self.resync_events,
+            self.discarded_bytes,
+        )
+        last_recv_ts = self.last_recv_ts
+        self.reset()
+        # 保留上次到达时间，让跨统计周期的 recv 空窗仍计入 max_interval。
+        self.last_recv_ts = last_recv_ts
+
 
 class ScreenshotStream:
     """推流截图管理器，独立端口+socket，与 RPC 通道隔离。
 
-    线程安全：后台线程写 _latest_frame，get_frame() 读，
-    通过 _lock 保护，_frame_event 用于等待首帧。
+    后台线程通过 _frame_cond 更新帧缓存并唤醒消费端；录屏状态由同一
+    生产线程追加，停止流程先关闭 socket，再回收线程和端口转发。
     """
 
     def __init__(self, device: 'HdcDevice', scale: float = 0.99):
+        """初始化连接、帧缓存、性能统计和录屏状态。"""
         self._device = device
         self._scale = scale
         self._local_port: Optional[int] = None
@@ -93,6 +213,9 @@ class ScreenshotStream:
         self._latest_frame: Optional[bytes] = None
         self._frame_seq: int = 0
         self._frame_lock = threading.Lock()
+        # 复用 _frame_lock 作为底层锁：新帧到达时唤醒 wait_frame_bytes_seq 的
+        # 消费者（MJPEG 推流循环），消除固定轮询延迟，实现帧到即推。
+        self._frame_cond = threading.Condition(self._frame_lock)
         self._frame_event = threading.Event()
         self._recv_buffer = bytearray()
 
@@ -102,6 +225,7 @@ class ScreenshotStream:
         self._perf_last_ts: Optional[float] = None
         self._perf_gap_max = 0.0
         self._perf_period_start = 0.0
+        self._perf_diagnostics = _CaptureDiagnostics()
 
         # 录屏状态
         self._recording: bool = False
@@ -125,24 +249,34 @@ class ScreenshotStream:
         if self._streaming:
             return True
 
-        try:
-            self._setup_connection()
-            self._send_stop_then_start()
-            self._start_recv_thread()
+        max_retries = 2
+        for attempt in range(1, max_retries + 1):
+            try:
+                self._setup_connection()
+                self._send_stop_then_start()
+                self._start_recv_thread()
 
-            # 等待首帧
-            if not self._frame_event.wait(timeout=timeout):
-                logger.warning("ScreenshotStream 等待首帧超时")
+                # 等待首帧
+                if self._frame_event.wait(timeout=timeout):
+                    logger.debug("ScreenshotStream 推流已启动 (port=%d, scale=%.4f)",
+                                self._local_port, self._scale)
+                    return True
+                logger.warning("ScreenshotStream 等待首帧超时 (尝试 %d/%d)", attempt, max_retries)
                 self.stop()
-                return False
+            except Exception as e:
+                logger.warning("ScreenshotStream 启动失败 (尝试 %d/%d): %s", attempt, max_retries, e)
+                self.stop()
 
-            logger.debug("ScreenshotStream 推流已启动 (port=%d, scale=%.4f)",
-                        self._local_port, self._scale)
-            return True
-        except Exception as e:
-            logger.error("ScreenshotStream 启动失败: %s", e)
-            self.stop()
-            return False
+            if attempt < max_retries:
+                try:
+                    logger.info("ScreenshotStream 尝试清理设备端 uitest 残留进程...")
+                    self._device.shell("killall -9 uitest")
+                except Exception as ex:
+                    logger.warning("清理设备端 uitest 进程异常: %s", ex)
+                time.sleep(1.0)
+
+        logger.error("ScreenshotStream 最终启动失败")
+        return False
 
     def get_frame(self) -> Optional['Image']:
         """获取最新一帧截图。
@@ -175,6 +309,21 @@ class ScreenshotStream:
         if not self._streaming:
             return self._frame_seq, None
         with self._frame_lock:
+            return self._frame_seq, self._latest_frame
+
+    def wait_frame_bytes_seq(self, last_seq: int,
+                             timeout: float) -> Tuple[int, Optional[bytes]]:
+        """阻塞等待比 last_seq 更新的帧，返回 (帧序号, 最新帧 bytes)。
+
+        帧到即返回，消除消费端固定轮询延迟；timeout 秒内无新帧则返回当前
+        (seq, frame)，供消费端做心跳与断连探测。未推流返回 (当前序号, None)。
+        并发 stop() 会 notify 唤醒等待者，避免卡满整个 timeout。
+        """
+        if not self._streaming:
+            return self._frame_seq, None
+        with self._frame_cond:
+            if self._frame_seq == last_seq and self._streaming:
+                self._frame_cond.wait(timeout)
             return self._frame_seq, self._latest_frame
 
     # ============================================================
@@ -375,6 +524,10 @@ class ScreenshotStream:
 
         self._streaming = False
 
+        # 唤醒 wait_frame_bytes_seq 的等待者，避免推流停止后仍卡满 timeout
+        with self._frame_cond:
+            self._frame_cond.notify_all()
+
         # 先发送 stopCaptureScreen 停止推流
         try:
             self._send_captures_on_sock('stopCaptureScreen', {})
@@ -420,6 +573,7 @@ class ScreenshotStream:
         daemon_error = []
 
         def _start_daemon():
+            """在线程中启动守护进程，并把异常交回主线程统一处理。"""
             try:
                 agent.ensure_daemon_running()
             except Exception as e:  # 捕获后在主线程重抛，保留原异常
@@ -501,6 +655,13 @@ class ScreenshotStream:
 
     def _start_recv_thread(self) -> None:
         """启动后台接收线程。"""
+        if _PERF_ENABLED:
+            self._perf_frames = 0
+            self._perf_bytes = 0
+            self._perf_last_ts = None
+            self._perf_gap_max = 0.0
+            self._perf_period_start = 0.0
+            self._perf_diagnostics.reset()
         self._streaming = True
         self._thread = threading.Thread(target=self._recv_loop, daemon=True)
         self._thread.start()
@@ -510,18 +671,40 @@ class ScreenshotStream:
         logger.debug("ScreenshotStream 接收线程启动")
         while self._streaming and self._sock is not None:
             try:
+                recv_started = time.perf_counter() if _PERF_ENABLED else 0.0
                 chunk = self._sock.recv(65536)
+                recv_finished = time.perf_counter() if _PERF_ENABLED else 0.0
                 if not chunk:
                     logger.warning("ScreenshotStream socket 对端关闭")
                     break
                 self._recv_buffer.extend(chunk)
+                if _PERF_ENABLED:
+                    self._perf_diagnostics.record_recv(
+                        (recv_finished - recv_started) * 1000.0,
+                        len(chunk),
+                        len(self._recv_buffer),
+                        recv_finished,
+                    )
+                    parse_started = time.perf_counter()
                 self._parse_frames()
+                if _PERF_ENABLED:
+                    parse_ms = (time.perf_counter() - parse_started) * 1000.0
+                    self._perf_diagnostics.record_parse(
+                        parse_ms, len(self._recv_buffer)
+                    )
+                    self._perf_diagnostics.maybe_log(len(self._recv_buffer))
             except OSError as e:
                 if self._streaming:
                     logger.warning("ScreenshotStream 接收异常: %s", e)
                 break
 
-        self._streaming = False
+        if _PERF_ENABLED:
+            self._perf_diagnostics.maybe_log(
+                len(self._recv_buffer), force=True
+            )
+        with self._frame_cond:
+            self._streaming = False
+            self._frame_cond.notify_all()
         logger.debug("ScreenshotStream 接收线程退出")
 
     def _parse_frames(self) -> None:
@@ -577,22 +760,31 @@ class ScreenshotStream:
 
         # 丢弃 HEAD 之前的垃圾数据
         if head_pos > 0:
+            if _PERF_ENABLED:
+                self._perf_diagnostics.record_discard(head_pos)
             del self._recv_buffer[:head_pos]
 
         # 检查是否有足够的数据读取 sessionId + length
         if len(self._recv_buffer) < head_len + 8:
+            if _PERF_ENABLED:
+                self._perf_diagnostics.protocol_waits += 1
             return 0
 
         # 读取 body 长度
         body_len = struct.unpack('>I', self._recv_buffer[head_len + 4:head_len + 8])[0]
         total_len = aux_len + body_len
 
-        if body_len > 4 * 1024 * 1024:
+        if body_len > MAX_PROTOCOL_BODY_SIZE:
+            if _PERF_ENABLED:
+                self._perf_diagnostics.invalid_lengths += 1
+                self._perf_diagnostics.record_discard(head_len)
             del self._recv_buffer[:head_len]
             return head_len
 
         # 检查是否有完整帧
         if len(self._recv_buffer) < total_len:
+            if _PERF_ENABLED:
+                self._perf_diagnostics.protocol_waits += 1
             return 0
 
         # 提取 body
@@ -602,15 +794,24 @@ class ScreenshotStream:
         # 验证 TAIL
         tail_pos = body_start + body_len
         if self._recv_buffer[tail_pos:tail_pos + tail_len] != RPC_TAIL:
+            if _PERF_ENABLED:
+                self._perf_diagnostics.invalid_tails += 1
+                self._perf_diagnostics.record_discard(head_len)
             del self._recv_buffer[:head_len]
             return head_len
 
         # 消费完整帧
         del self._recv_buffer[:total_len]
+        if _PERF_ENABLED:
+            self._perf_diagnostics.protocol_frames += 1
 
         # 判断 body 是 JPEG 还是 JSON 响应
         if len(body) >= 2 and body[0] == 0xFF and body[1] == 0xD8:
+            if _PERF_ENABLED:
+                self._perf_diagnostics.protocol_jpegs += 1
             self._on_jpeg_frame(body)
+        elif _PERF_ENABLED:
+            self._perf_diagnostics.protocol_other += 1
 
         return total_len
 
@@ -625,24 +826,40 @@ class ScreenshotStream:
             # 没有 JPEG 开头，也没有协议帧 HEAD，清空垃圾数据
             # 但保留最后几个字节防止跨 chunk 的标记被截断
             if len(self._recv_buffer) > 4:
+                discarded = len(self._recv_buffer) - 4
+                if _PERF_ENABLED:
+                    self._perf_diagnostics.record_discard(discarded)
                 del self._recv_buffer[:-4]
+            if _PERF_ENABLED:
+                self._perf_diagnostics.raw_waits += 1
             return 0
 
         eoi = self._recv_buffer.find(JPEG_EOI, soi + 2)
         if eoi < 0:
             # 超过最大帧大小仍未找到 EOI，丢弃 SOI 及之前数据防止缓冲区无限增长
             if len(self._recv_buffer) - soi > MAX_FRAME_SIZE:
-                del self._recv_buffer[:soi + 2]
+                discarded = soi + 2
+                if _PERF_ENABLED:
+                    self._perf_diagnostics.raw_oversized += 1
+                    self._perf_diagnostics.record_discard(discarded)
+                del self._recv_buffer[:discarded]
                 logger.warning("裸 JPEG 帧超过 %dMB 未闭合，丢弃残余数据", MAX_FRAME_SIZE // (1024 * 1024))
-                return soi + 2
+                return discarded
             # JPEG 不完整，丢弃 SOI 之前的数据，等待更多数据
             if soi > 0:
+                if _PERF_ENABLED:
+                    self._perf_diagnostics.record_discard(soi)
                 del self._recv_buffer[:soi]
+            if _PERF_ENABLED:
+                self._perf_diagnostics.raw_waits += 1
             return 0
 
         # 提取完整 JPEG 帧
         frame_end = eoi + 2
         frame_data = bytes(self._recv_buffer[soi:frame_end])
+        if _PERF_ENABLED:
+            self._perf_diagnostics.raw_jpegs += 1
+            self._perf_diagnostics.record_discard(soi)
         del self._recv_buffer[:frame_end]
 
         self._on_jpeg_frame(frame_data)
@@ -650,9 +867,11 @@ class ScreenshotStream:
 
     def _on_jpeg_frame(self, frame_data: bytes) -> None:
         """处理一个完整的 JPEG 帧：缓存 + 录屏落盘。"""
-        with self._frame_lock:
+
+        with self._frame_cond:
             self._latest_frame = frame_data
             self._frame_seq += 1
+            self._frame_cond.notify_all()
         self._frame_event.set()
 
         if _PERF_ENABLED:
