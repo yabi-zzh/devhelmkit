@@ -5,6 +5,18 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1]
+
+### 性能
+
+- 纯类型 XPath（如 `//Text`）可直接下推至设备端选择器，绕过控件树解析与 bounds 锚定，降低常见类型查询延迟。
+- 批量 XPath 按控件类型分组并复用候选扫描，减少重复 RPC 与 bounds 查询。
+
+### 修复
+
+- XPath 单控件查找在 `timeout` 内轮询控件树，支持异步渲染以及节点出现后的 bounds 锚定竞态。
+- 非法 XPath 在轮询前快速失败；设备端快速路径失败时保留用户传入的原始 XPath 上下文。
+
 ## [0.4.0]
 
 ### 新增
@@ -69,6 +81,7 @@
 - 采用 src layout 目录结构（包源码位于 `src/devhelmkit/`）。
 - `license` 声明改用 SPDX 表达式格式。
 
+[0.4.1]: https://github.com/yabi-zzh/devhelmkit/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.0...v0.3.1
