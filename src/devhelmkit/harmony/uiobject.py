@@ -94,7 +94,7 @@ class UiObject(BaseComponent):
 
     def set_text(self, text: str,
                  timeout: Optional[float] = None) -> None:
-        self._call_component("setText", [text], timeout=timeout)
+        self._call_component("inputText", [text], timeout=timeout)
 
     def get_text(self, timeout: Optional[float] = None) -> str:
         return self._call_component("getText", timeout=timeout)

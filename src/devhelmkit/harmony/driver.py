@@ -1859,6 +1859,8 @@ _UIDIRECTION_MAP = {"LEFT": 0, "RIGHT": 1, "UP": 2, "DOWN": 3}
 
 def _to_selector(target) -> Optional[SelectorSpec]:
     """将 target 转为 SelectorSpec。"""
+    if isinstance(target, UiObject):
+        return target._selector
     if isinstance(target, SelectorSpec):
         return target
     if isinstance(target, dict):
