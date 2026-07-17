@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from PIL.Image import Image
@@ -60,8 +60,25 @@ class BaseComponent(ABC):
         """
 
     @abstractmethod
-    def click_exists(self, timeout: float = 0) -> bool:
-        """存在则点击，返回是否成功。"""
+    def click_if_exists(self, timeout: float = 0) -> bool:
+        """存在则点击，未找到时返回 False。"""
+
+    @property
+    @abstractmethod
+    def count(self) -> int:
+        """返回当前匹配控件数量。"""
+
+    @abstractmethod
+    def all(self) -> List['BaseComponent']:
+        """返回当前匹配的全部控件对象。"""
+
+    @abstractmethod
+    def first(self) -> 'BaseComponent':
+        """返回第一个匹配控件对象。"""
+
+    @abstractmethod
+    def last(self) -> 'BaseComponent':
+        """返回最后一个匹配控件对象。"""
 
     # ============================================================
     # 文本类
@@ -118,6 +135,23 @@ class BaseComponent(ABC):
     @abstractmethod
     def wait_gone(self, timeout: float) -> bool:
         """等待消失。"""
+
+    @abstractmethod
+    def wait_enabled(self, timeout: float) -> bool:
+        """等待控件变为可用。"""
+
+    @abstractmethod
+    def wait_disabled(self, timeout: float) -> bool:
+        """等待控件变为禁用。"""
+
+    @abstractmethod
+    def wait_clickable(self, timeout: float) -> bool:
+        """等待控件变为可点击。"""
+
+    @abstractmethod
+    def wait_until(self, condition: Callable[[Dict[str, Any]], bool],
+                   timeout: float) -> bool:
+        """等待控件信息满足条件。"""
 
     # ============================================================
     # 信息类
