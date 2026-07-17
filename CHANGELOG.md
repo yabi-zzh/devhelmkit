@@ -5,6 +5,23 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0]
+
+### 新增
+
+- 控件选择器新增集合 API：通过 `count` 获取匹配数量，通过 `all()`、`first()`、`last()` 获取全部、首个或末个匹配控件。
+- 控件新增条件等待 API：`wait_enabled()`、`wait_disabled()`、`wait_clickable()`，以及接收控件信息断言的 `wait_until()`。
+- Driver 目标参数支持直接传入 `UiObject`，可复用控件选择器执行边界查询、拖拽等操作。
+
+### 变更
+
+- `click_exists()` 更名为 `click_if_exists()`；旧名称不再保留。迁移时请直接替换方法名，参数和布尔返回语义保持一致。
+
+### 修复
+
+- HarmonyOS `set_text()` 改用设备端 `Component.inputText` API，修复部分输入框无法写入文本的问题。
+- XPath 批量查找返回全部匹配控件，不再退化为单控件结果。
+
 ## [0.4.1]
 
 ### 性能
@@ -81,6 +98,7 @@
 - 采用 src layout 目录结构（包源码位于 `src/devhelmkit/`）。
 - `license` 声明改用 SPDX 表达式格式。
 
+[0.5.0]: https://github.com/yabi-zzh/devhelmkit/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/yabi-zzh/devhelmkit/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.1...v0.3.2

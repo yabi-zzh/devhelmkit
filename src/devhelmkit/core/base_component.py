@@ -137,20 +137,20 @@ class BaseComponent(ABC):
         """等待消失。"""
 
     @abstractmethod
-    def wait_enabled(self, timeout: float) -> bool:
+    def wait_enabled(self, timeout: Optional[float] = None) -> bool:
         """等待控件变为可用。"""
 
     @abstractmethod
-    def wait_disabled(self, timeout: float) -> bool:
+    def wait_disabled(self, timeout: Optional[float] = None) -> bool:
         """等待控件变为禁用。"""
 
     @abstractmethod
-    def wait_clickable(self, timeout: float) -> bool:
+    def wait_clickable(self, timeout: Optional[float] = None) -> bool:
         """等待控件变为可点击。"""
 
     @abstractmethod
     def wait_until(self, condition: Callable[[Dict[str, Any]], bool],
-                   timeout: float) -> bool:
+                   timeout: Optional[float] = None) -> bool:
         """等待控件信息满足条件。"""
 
     # ============================================================

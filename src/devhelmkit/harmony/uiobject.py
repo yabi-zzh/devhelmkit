@@ -92,7 +92,7 @@ class UiObject(BaseComponent):
     def click_if_exists(self, timeout: float = 0) -> bool:
         """存在则点击；控件未找到时返回 False。"""
         try:
-            self._call_component("clickIfExists", [timeout], timeout=timeout)
+            self.click(timeout=timeout)
             return True
         except ComponentNotFoundError:
             return False

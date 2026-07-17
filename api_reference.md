@@ -35,6 +35,7 @@
   - [坐标转换](#坐标转换)
 - [控件 API](#控件-api)
   - [点击](#点击)
+  - [集合](#集合)
   - [文本](#文本)
   - [状态](#状态)
   - [信息](#信息)
@@ -651,13 +652,44 @@ if result:
 
 双击控件。
 
-#### `click_exists(timeout=0) -> bool`
+#### `click_if_exists(timeout=0) -> bool`
 
-存在则点击，返回是否成功。
+控件存在时点击并返回 `True`，未找到时返回 `False`。`timeout=0` 时仅检查一次。
 
 #### `refresh() -> None`
 
 手动失效缓存的控件引用，下次操作时重新查找。适用于控件可能已被回收或重建的场景。
+
+---
+
+### 集合
+
+集合方法会按当前选择器批量查询控件；返回的控件对象可继续执行点击、输入和属性读取等操作。
+
+#### `count -> int`
+
+当前匹配的控件数量（属性）。
+
+#### `all() -> List[BaseComponent]`
+
+返回当前匹配的全部控件对象；无匹配时返回空列表。
+
+#### `first() -> BaseComponent`
+
+返回第一个匹配控件。无匹配时抛出 `ComponentNotFoundError`。
+
+#### `last() -> BaseComponent`
+
+返回最后一个匹配控件。无匹配时抛出 `ComponentNotFoundError`。
+
+```python
+items = d(className="ListItem")
+print(items.count)
+for item in items.all():
+    print(item.get_text())
+items.first().click()
+items.last().click()
+```
 
 ---
 
@@ -694,6 +726,35 @@ if result:
 #### `wait_gone(timeout: float) -> bool`
 
 等待控件消失，消失返回 `True`。
+
+#### `wait_enabled(timeout=None) -> bool`
+
+等待控件变为可用，条件满足返回 `True`，超时返回 `False`。`timeout=None` 时使用驱动的隐式等待时长。
+
+#### `wait_disabled(timeout=None) -> bool`
+
+等待控件变为禁用，条件满足返回 `True`，超时返回 `False`。`timeout=None` 时使用驱动的隐式等待时长。
+
+#### `wait_clickable(timeout=None) -> bool`
+
+等待控件变为可点击，条件满足返回 `True`，超时返回 `False`。`timeout=None` 时使用驱动的隐式等待时长。
+
+#### `wait_until(condition, timeout=None) -> bool`
+
+重复读取控件 `info`，直到 `condition(info)` 返回真值。条件满足返回 `True`，超时返回 `False`；控件暂未出现时会继续等待。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| condition | `Callable[[Dict[str, Any]], bool]` | — | 接收当前控件信息并返回真值的函数 |
+| timeout | `Optional[float]` | `None` | 超时秒数，`None` 使用驱动的隐式等待时长；不能为负数 |
+
+```python
+d(id="submit").wait_clickable(timeout=5)
+d(id="status").wait_until(
+    lambda info: info.get("text") == "完成",
+    timeout=10,
+)
+```
 
 ---
 
