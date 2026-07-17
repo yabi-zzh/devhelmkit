@@ -9,7 +9,7 @@ description = "跨平台 UI 自动化框架，当前聚焦 HarmonyOS"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 authors = [
     { name = "devhelmkit contributors" },
 ]
@@ -19,21 +19,18 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-    "Pillow>=9.0.0",
+    "Pillow>=12.2.0",
     "lxml>=5.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
+    "pytest>=9.0.3",
     "pytest-cov>=4.0",
     "build>=1.0",
     "twine>=4.0",

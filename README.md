@@ -111,7 +111,7 @@ devhelmkit-uiviewer --perf
 
 ### 前置条件
 
-- **Python 3.8+**（Windows / Linux / macOS）
+- **Python 3.11+**（Windows / Linux / macOS）
 - **HarmonyOS 设备**，已开启开发者模式和 USB 调试
 - **hdc**（HarmonyOS Device Connector）— 用于设备通信
 
