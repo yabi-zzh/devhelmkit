@@ -80,4 +80,5 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-pythonpath = ["tests"]
+# src layout：加入 src 使测试无需安装即可导入包
+pythonpath = ["src", "tests"]
