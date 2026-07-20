@@ -21,11 +21,14 @@ chromedriver 二进制需用户自行下载放置于 search_path 目录下：
         ├── chromedriver
         └── chromedriver.mac
 """
+import json
 import logging
 import os
 import platform
+import socket
 import stat
 import subprocess
+import tempfile
 import time
 import urllib.request
 from typing import Optional
@@ -34,16 +37,10 @@ from devhelmkit.exceptions import DevhelmError
 
 logger = logging.getLogger(__name__)
 
-# chromedriver 默认监听端口
-DEFAULT_CHROMEDRIVER_PORT = 9515
-
 # chromedriver 日志级别环境变量名
 CHROME_DRIVER_LOG_LEVEL_ENV = "CHROME_DRIVER_LOG_LEVEL"
 
-# 进程状态检查重试次数
-KILL_RETRY = 3
-
-# kill 后等待时间（秒）
+# 停止旧进程后到重启之间的等待时间（秒），留出端口释放窗口
 KILL_WAIT = 1.0
 
 
@@ -52,15 +49,17 @@ class ChromedriverManager:
 
     def __init__(self, search_path: str = "",
                  exe_path: str = "",
-                 port: int = DEFAULT_CHROMEDRIVER_PORT):
+                 port: int = 0):
         """
         Args:
             search_path: chromedriver 存放目录（多版本目录结构）
             exe_path: 直接指定 chromedriver 可执行文件路径（优先于 search_path）
-            port: chromedriver 监听端口
+            port: chromedriver 监听端口，0 表示启动时动态分配空闲端口，
+                避免固定端口造成全机只能跑一个实例
         """
         self._search_path = search_path
         self._exe_path = exe_path
+        self._fixed_port = port
         self._port = port
         self._process: Optional[subprocess.Popen] = None
         self._log_path = ""
@@ -85,8 +84,8 @@ class ChromedriverManager:
     def start(self, webview_version: int) -> None:
         """启动与 webview 版本匹配的 chromedriver。
 
-        若已有 chromedriver 运行且版本匹配则复用；
-        版本不匹配则停止旧进程后重启。
+        chromedriver 主版本必须与 webview 内核一致：已运行实例的主版本
+        与目标不相等时（无论更高还是更低）都停止后重启；相等才复用。
 
         Args:
             webview_version: 设备端 webview 内核版本号（如 114）
@@ -97,9 +96,9 @@ class ChromedriverManager:
         chrome_path = self._resolve_path(webview_version)
         if self._is_running():
             current_version = self._get_version()
-            if current_version < webview_version:
+            if current_version != webview_version:
                 logger.debug(
-                    "chromedriver 版本 %d 低于 webview 版本 %d，重启",
+                    "chromedriver 版本 %d 与 webview 版本 %d 不一致，重启",
                     current_version, webview_version
                 )
                 self.stop()
@@ -111,33 +110,29 @@ class ChromedriverManager:
             self._start_process(chrome_path)
 
     def stop(self) -> None:
-        """停止 chromedriver 进程。"""
-        if self._process is not None:
-            try:
-                self._process.terminate()
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait(timeout=3)
-            except Exception as e:
-                logger.warning("停止 chromedriver 进程异常: %s", e)
-            finally:
-                self._process = None
-            return
+        """停止本实例启动的 chromedriver 进程。
 
-        # 进程非本实例启动（残留），按名称 kill
-        proc_name = self._get_process_name()
-        for _ in range(KILL_RETRY):
-            self._kill_by_name(proc_name)
-            time.sleep(KILL_WAIT)
-            if not self._is_running_by_name(proc_name):
-                return
-        logger.warning("未能停止 chromedriver 进程")
+        只管理自己启动的 _process，不按进程名清理"残留"，
+        避免误杀其他项目或用户的 chromedriver / selenium 会话。
+        """
+        if self._process is None:
+            return
+        try:
+            self._process.terminate()
+            self._process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait(timeout=3)
+        except Exception as e:
+            logger.warning("停止 chromedriver 进程异常: %s", e)
+        finally:
+            self._process = None
 
     def _resolve_path(self, version: int) -> str:
         """解析 chromedriver 可执行文件路径。
 
-        优先级：exe_path > search_path/chromedriver_{version}/{name} > 内置
+        优先级：exe_path > search_path/chromedriver_{version}/{name}；
+        无内置回退，两者均未配置或文件不存在时直接报错。
         """
         proc_name = self._get_process_name()
         if self._exe_path:
@@ -160,8 +155,12 @@ class ChromedriverManager:
         if not _is_windows():
             os.chmod(chrome_path, stat.S_IRWXU)
 
+        # 未指定固定端口时动态分配，支持多实例并行
+        if self._fixed_port <= 0:
+            self._port = _get_unused_port()
+
         log_path = os.path.join(
-            _get_temp_dir(), "chromedriver.log"
+            tempfile.gettempdir(), "chromedriver.log"
         )
         log_level = os.getenv(CHROME_DRIVER_LOG_LEVEL_ENV, "info")
         cmd = [
@@ -176,54 +175,35 @@ class ChromedriverManager:
 
     def _is_running(self) -> bool:
         """检查 chromedriver 是否在运行（通过 HTTP /status）。"""
+        if self._port <= 0:
+            return False
         try:
-            urllib.request.urlopen(
+            with urllib.request.urlopen(
                 self.host + "/status", timeout=2
-            ).read()
+            ) as response:
+                response.read()
             return True
         except Exception:
             return False
 
-    def _is_running_by_name(self, name: str) -> bool:
-        """通过进程名检查是否运行。"""
-        if _is_windows():
-            try:
-                result = subprocess.run(
-                    ["tasklist"],
-                    capture_output=True, text=True, timeout=10
-                )
-                return name in result.stdout
-            except Exception:
-                return False
-        else:
-            try:
-                result = subprocess.run(
-                    ["pgrep", "-f", name],
-                    capture_output=True, text=True, timeout=10
-                )
-                return bool(result.stdout.strip())
-            except Exception:
-                return False
-
-    def _kill_by_name(self, name: str) -> None:
-        """按进程名 kill。"""
-        if _is_windows():
-            subprocess.run(["taskkill", "/F", "/IM", name],
-                          capture_output=True, timeout=10)
-        else:
-            subprocess.run(["pkill", "-f", name],
-                          capture_output=True, timeout=10)
-
     def _get_version(self) -> int:
-        """查询运行中 chromedriver 的版本号。"""
+        """查询运行中 chromedriver 的主版本号，失败返回 0。
+
+        /status 返回结构: {"value": {"build": {"version": "114.0.x.y (...)"}}}
+        """
         for _ in range(3):
             try:
-                resp = urllib.request.urlopen(
+                with urllib.request.urlopen(
                     self.host + "/status", timeout=5
-                ).read().decode("utf-8", errors="ignore")
-                match = __import__("re").search(r'"version":"(\d+)\.', resp)
-                if match:
-                    return int(match.group(1))
+                ) as response:
+                    resp = response.read().decode("utf-8", errors="ignore")
+                info = json.loads(resp)
+                version_str = (
+                    info.get("value", {}).get("build", {}).get("version", "")
+                )
+                major = version_str.split(".", 1)[0]
+                if major.isdigit():
+                    return int(major)
             except Exception as e:
                 logger.debug("查询 chromedriver 版本失败: %s", e)
         return 0
@@ -247,6 +227,11 @@ def _is_mac() -> bool:
     return platform.system() == "Darwin"
 
 
-def _get_temp_dir() -> str:
-    """获取系统临时目录。"""
-    return os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp"
+def _get_unused_port() -> int:
+    """获取一个本地空闲端口。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()

@@ -62,20 +62,23 @@ class WebViewDriver:
     def __init__(self, device: "HdcDevice",
                  chromedriver_search_path: str = "",
                  chromedriver_exe_path: str = "",
-                 chromedriver_port: int = 9515):
+                 chromedriver_port: int = 0):
         """
         Args:
             device: HdcDevice 实例
             chromedriver_search_path: chromedriver 存放目录（多版本结构）
             chromedriver_exe_path: 直接指定 chromedriver 路径（优先）
-            chromedriver_port: chromedriver 监听端口
+            chromedriver_port: chromedriver 监听端口，0 表示每次启动
+                动态分配空闲端口，避免固定端口造成全机单实例互斥
         """
         self._device = device
         self._bundle_name: Optional[str] = None
         self._driver: Optional["WebDriver"] = None
         self._devtool_port = DEFAULT_DEVTOOL_PORT
         self._remote_devtool_port = DEFAULT_DEVTOOL_PORT
-        self._fport_established = False
+        # 记录已建立转发的设备端目标（如 "tcp:9222"），None 表示未建立；
+        # 移除时需与建立时的 (本地端口, 目标) 对称，否则 hdc 无法定位规则
+        self._fport_target: Optional[str] = None
 
         self._finder = DevtoolsFinder(device)
         self._chromedriver = ChromedriverManager(
@@ -120,10 +123,15 @@ class WebViewDriver:
         """
         self._bundle_name = bundle_name
         self.close()
-        self._setup_port_forward(bundle_name, remote_devtools_port)
-        webview_version = self._get_webview_version()
-        self._chromedriver.start(webview_version)
-        self._driver = self._connect_selenium(options, connection_timeout)
+        # 失败时回收本次已建立的 fport 与 chromedriver，避免半连接状态残留
+        try:
+            self._setup_port_forward(bundle_name, remote_devtools_port)
+            webview_version = self._get_webview_version()
+            self._chromedriver.start(webview_version)
+            self._driver = self._connect_selenium(options, connection_timeout)
+        except Exception:
+            self.close()
+            raise
         return self._driver
 
     def close(self) -> None:
@@ -188,7 +196,14 @@ class WebViewDriver:
         return result
 
     def __getattr__(self, name):
-        """代理未找到的属性到 selenium webdriver。"""
+        """代理未找到的属性到 selenium webdriver。
+
+        未连接时给出明确指引，避免暴露 NoneType 属性错误。
+        """
+        if self._driver is None:
+            raise DevhelmError(
+                "webview 未连接，无法访问属性 %r，请先调用 connect()" % name
+            )
         return getattr(self._driver, name)
 
     def __enter__(self):
@@ -203,7 +218,7 @@ class WebViewDriver:
 
     def _setup_port_forward(self, bundle_name: str,
                             remote_devtools_port: Optional[int]) -> None:
-        """建立 hdc 端口转发。"""
+        """建立主机侧 hdc 端口转发（本地端口 -> 设备端 devtools）。"""
         self._devtool_port = _get_unused_port()
 
         if remote_devtools_port is not None:
@@ -214,9 +229,7 @@ class WebViewDriver:
                     "设备端 devtools 端口 %d 未开放，请检查应用是否已开启 web 调试"
                     % remote_devtools_port
                 )
-            self._device.shell(
-                "hdc fport tcp:%d tcp:%d" % (self._devtool_port, remote_devtools_port)
-            )
+            target = "tcp:%d" % remote_devtools_port
         elif self._finder.is_using_domain_socket():
             # 系统 web 内核，通过 domain socket 探测
             socket_name = self._finder.find_devtools_socket(bundle_name)
@@ -225,48 +238,48 @@ class WebViewDriver:
                     "未找到 %s 的 devtools socket，请检查应用是否已开启 web 调试"
                     % bundle_name
                 )
-            self._device.shell(
-                "hdc fport tcp:%d localabstract:%s"
-                % (self._devtool_port, socket_name)
-            )
+            target = "localabstract:%s" % socket_name
         else:
             # 未指定端口且非 domain socket，尝试默认 tcp 端口
             if not self._finder.check_tcp_port(self._remote_devtool_port):
                 raise DevhelmError(
                     "设备端 devtools 端口 %d 未开放" % self._remote_devtool_port
                 )
-            self._device.shell(
-                "hdc fport tcp:%d tcp:%d"
-                % (self._devtool_port, self._remote_devtool_port)
-            )
+            target = "tcp:%d" % self._remote_devtool_port
 
-        self._fport_established = True
+        self._device.fport(self._devtool_port, target)
+        self._fport_target = target
         logger.debug(
-            "devtools 端口转发已建立: tcp:%d -> 设备 (bundle=%s)",
-            self._devtool_port, bundle_name
+            "devtools 端口转发已建立: tcp:%d -> %s (bundle=%s)",
+            self._devtool_port, target, bundle_name
         )
 
     def _remove_port_forward(self) -> None:
-        """移除 hdc 端口转发。"""
-        if not self._fport_established:
+        """移除 hdc 端口转发，与建立时的 (本地端口, 目标) 对称。"""
+        if self._fport_target is None:
             return
         try:
-            self._device.shell("hdc fport rm tcp:%d" % self._devtool_port)
+            self._device.fport_rm(self._devtool_port, self._fport_target)
         except Exception as e:
             logger.warning("移除端口转发异常: %s", e)
         finally:
-            self._fport_established = False
+            self._fport_target = None
 
     def _get_webview_version(self, retry: int = 3) -> int:
         """查询设备端 webview 内核版本。
 
-        通过 devtools /json/version 接口获取。
+        通过 devtools /json/version 接口获取。chromedriver 主版本必须与
+        内核一致，探测失败时直接报错，不回退到猜测版本。
+
+        Raises:
+            DevhelmError: devtools 端口探测失败
         """
         for _ in range(retry):
             try:
-                resp = urllib.request.urlopen(
+                with urllib.request.urlopen(
                     self.devtools_url + "/json/version", timeout=5
-                ).read().decode("utf-8", errors="ignore")
+                ) as response:
+                    resp = response.read().decode("utf-8", errors="ignore")
                 info = json.loads(resp)
                 browser = info.get("Browser", "")
                 match = re.search(r"/(\d+)\.", browser)
@@ -277,8 +290,10 @@ class WebViewDriver:
                 logger.warning("未知 webview 版本信息: %s", resp)
             except Exception as e:
                 logger.warning("查询 webview 版本失败: %s", e)
-        logger.warning("无法获取 webview 版本，回退到 114")
-        return 114
+        raise DevhelmError(
+            "devtools 端口探测失败，请确认应用已启动且 webview 已加载"
+            "（devtools 地址: %s）" % self.devtools_url
+        )
 
     def _connect_selenium(self, options, timeout: int) -> "WebDriver":
         """通过 selenium Remote 连接 chromedriver。"""
@@ -290,6 +305,9 @@ class WebViewDriver:
                 "selenium 未安装，请执行 pip install selenium 或 pip install devhelmkit[webview]"
             ) from e
 
+        # 注意：set_timeout 是 RemoteConnection 的类级方法，会影响当前进程内
+        # 所有 selenium 远程连接的超时设置（包括其他 webdriver 会话）。
+        # selenium 未提供实例级超时入口，此处保留全局设置并明示该副作用。
         RemoteConnection.set_timeout(timeout)
 
         if options is None:

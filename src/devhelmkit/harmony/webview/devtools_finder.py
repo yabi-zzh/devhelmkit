@@ -12,6 +12,8 @@ HarmonyOS webview 调试端口有两种形态：
   3. 在 /proc/net/unix 中匹配包含该 PID 的 devtools socket 名
 """
 import logging
+import re
+import shlex
 import time
 from typing import List, Optional
 
@@ -79,10 +81,11 @@ class DevtoolsFinder:
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # 匹配 PID 与 socket 名称
+            # socket 名以 "_{pid}" 结尾才算命中，避免子串误匹配
+            # （如 pid "123" 误匹配 webview_devtools_remote_12345）
             for socket_name in devtools_sockets:
                 for pid in process_pids:
-                    if pid in socket_name:
+                    if socket_name.endswith("_" + pid):
                         logger.debug(
                             "找到 devtools socket: %s (pid=%s, bundle=%s)",
                             socket_name, pid, bundle_name
@@ -100,8 +103,10 @@ class DevtoolsFinder:
         Returns:
             True 表示端口已开放
         """
+        # grep 仅做粗过滤，边界匹配在主机侧完成，
+        # 避免端口号作为子串误命中（如 9222 命中 :92223）
         result = self._device.shell("netstat -tlnp | grep :%d" % port)
-        return str(port) in result
+        return re.search(r"[:.]%d\b" % port, result) is not None
 
     def _get_devtools_sockets(self) -> List[str]:
         """读取 /proc/net/unix 中所有 devtools socket 名称。"""
@@ -119,7 +124,8 @@ class DevtoolsFinder:
 
     def _get_bundle_pids(self, bundle_name: str) -> List[str]:
         """获取指定包名应用的所有进程 PID。"""
-        result = self._device.shell("ps -ef | grep %s" % bundle_name)
+        # 包名来自用户输入，quote 后再拼入设备 shell，防止命令注入
+        result = self._device.shell("ps -ef | grep %s" % shlex.quote(bundle_name))
         pids = []
         for line in result.split("\n"):
             items = line.split()

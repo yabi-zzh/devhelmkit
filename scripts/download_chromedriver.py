@@ -190,32 +190,53 @@ def download_and_extract(version_entry: dict, output_dir: str) -> str:
             sys.exit(1)
         print("Chrome for Testing 无 chromedriver 下载，回退到旧版源")
 
-    # 下载 zip
+    # 下载 zip；失败或中断时删除半截文件，避免残留损坏包干扰下次下载
     print("下载: %s" % download_url)
     tmp_zip = os.path.join(tempfile.gettempdir(), "chromedriver_%s.zip" % version_str)
     req = urllib.request.Request(download_url, headers={"User-Agent": "devhelmkit"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        with open(tmp_zip, "wb") as f:
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            with open(tmp_zip, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+    except BaseException:
+        if os.path.isfile(tmp_zip):
+            os.remove(tmp_zip)
+        raise
+
+    try:
+        # 解压前校验 zip 完整性，损坏包直接报错而非产出坏二进制
+        print("解压到: %s" % target_dir)
+        with zipfile.ZipFile(tmp_zip) as zf:
+            bad_entry = zf.testzip()
+            if bad_entry is not None:
+                print("zip 包损坏（条目 %s 校验失败），请重试下载" % bad_entry)
+                sys.exit(1)
+
+            # zip 内二进制条目名固定为 chromedriver / chromedriver.exe
+            # （可能位于子目录），只取 basename 精确相等的第一个，
+            # 避免 LICENSE.chromedriver 之类条目覆盖目标文件
+            entry_name = (
+                "chromedriver.exe" if platform.system() == "Windows"
+                else "chromedriver"
+            )
+            entry = None
+            for info in zf.infolist():
+                if os.path.basename(info.filename) == entry_name:
+                    entry = info
                     break
-                f.write(chunk)
+            if entry is None:
+                print("zip 包中未找到 %s 条目" % entry_name)
+                sys.exit(1)
 
-    # 解压：zip 内 chromedriver 二进制可能在子目录中（CFT 格式）或根目录（旧格式）
-    print("解压到: %s" % target_dir)
-    with zipfile.ZipFile(tmp_zip) as zf:
-        for info in zf.infolist():
-            basename = os.path.basename(info.filename)
-            if not basename:
-                continue
-            # 只提取 chromedriver 二进制（匹配 chromedriver / chromedriver.exe / chromedriver.mac）
-            if basename.startswith("chromedriver"):
-                with zf.open(info) as src:
-                    with open(final_path, "wb") as dst:
-                        dst.write(src.read())
-
-    os.remove(tmp_zip)
+            with zf.open(entry) as src:
+                with open(final_path, "wb") as dst:
+                    dst.write(src.read())
+    finally:
+        os.remove(tmp_zip)
 
     # 设置可执行权限（非 Windows）
     if platform.system() != "Windows":
@@ -263,8 +284,7 @@ def detect_webview_version(serial: str | None) -> int:
 
     # 方法一：通过 hdc shell 读取 webview 版本
     output = device.shell(
-        "cat /system/etc/webview/version.json 2>/dev/null "
-        "|| bm dump -n com.android.webview 2>/dev/null"
+        "cat /system/etc/webview/version.json 2>/dev/null"
     )
     import re
     match = re.search(r'"version"\s*:\s*"(\d+)\.', output)
