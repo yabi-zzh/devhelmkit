@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from devhelmkit.core.selector_spec import SelectorSpec, build_selector
@@ -98,6 +99,10 @@ class ComponentFinder:
         if selector.xpath is not None:
             direct_selector = _simple_type_xpath_selector(selector.xpath)
             if direct_selector is not None:
+                if selector.instance is not None:
+                    direct_selector = replace(
+                        direct_selector, instance=selector.instance
+                    )
                 try:
                     return self.find_component(direct_selector, timeout)
                 except ComponentNotFoundError as e:
@@ -105,6 +110,9 @@ class ComponentFinder:
                         "xpath 未匹配控件: %s" % selector.xpath
                     ) from e
             return self._find_by_xpath(selector, timeout)
+        # instance 选择第 N 个匹配：设备端 On 链无对应能力，客户端轮询实现
+        if selector.instance is not None:
+            return self._find_by_instance(selector, timeout)
         by_ref = self._build_by_ref(selector)
         timeout_ms = int(timeout * 1000)
         try:
@@ -135,6 +143,35 @@ class ComponentFinder:
                 "控件未找到: %s" % _format_selector(selector)
             )
         return result
+
+    def _find_by_instance(self, selector: SelectorSpec,
+                          timeout: float) -> str:
+        """等待第 instance 个（0 起）匹配控件出现并返回其引用。
+
+        设备端 findComponents 为即时查询，这里以渐进退避轮询直到
+        匹配数量足够或超时，对齐 waitForComponent 的等待语义。
+        """
+        instance = selector.instance or 0
+        if instance < 0:
+            raise DevhelmError("instance 不能为负数: %d" % instance)
+        base = replace(selector, instance=None)
+        deadline = time.monotonic() + max(timeout, 0.0)
+        interval = 0.1
+        first_attempt = True
+        while first_attempt or time.monotonic() < deadline:
+            first_attempt = False
+            refs = self.find_components(base)
+            if len(refs) > instance:
+                return refs[instance]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
+            interval = min(interval * 2, 0.5)
+        raise ComponentNotFoundError(
+            "控件未找到: %s (instance=%d)"
+            % (_format_selector(selector), instance)
+        )
 
     def _retry_find_after_dismiss(self, by_ref: str) -> Any:
         """弹窗消除成功后，按配置等待并以重试超时重新查找一次。
@@ -167,11 +204,27 @@ class ComponentFinder:
         if selector.xpath is not None:
             direct_selector = _simple_type_xpath_selector(selector.xpath)
             if direct_selector is not None:
+                if selector.instance is not None:
+                    direct_selector = replace(
+                        direct_selector, instance=selector.instance
+                    )
                 return self.find_components(direct_selector)
-            return self._find_components_by_xpath(selector)
+            return self._pick_instance(
+                self._find_components_by_xpath(selector), selector.instance
+            )
         by_ref = self._build_by_ref(selector)
         result = self._rpc.call("Driver.findComponents", DRIVER_REF, [by_ref])
-        return result if isinstance(result, list) else []
+        refs = result if isinstance(result, list) else []
+        return self._pick_instance(refs, selector.instance)
+
+    @staticmethod
+    def _pick_instance(refs: list, instance: Optional[int]) -> list:
+        """instance 非空时收窄为第 N 个匹配（0 起），越界返回空列表。"""
+        if instance is None:
+            return refs
+        if 0 <= instance < len(refs):
+            return [refs[instance]]
+        return []
 
     def component_exists(self, selector: SelectorSpec) -> bool:
         """检查控件是否存在。
@@ -261,14 +314,15 @@ class ComponentFinder:
         tree = self._dump_layout()
         if tree is None:
             return None
-        # xpath selector 走 xpath 查询取首个命中节点；否则按属性匹配。
+        # xpath selector 走 xpath 查询取命中节点；否则按属性匹配。
         # 不能对 xpath selector 走 _match_node_in_tree：其非 xpath 字段全为
         # None，会命中根节点造成误匹配。
+        instance = selector.instance or 0
         if selector.xpath is not None:
             nodes = query_xpath(tree, selector.xpath)
-            node = nodes[0] if nodes else None
+            node = nodes[instance] if len(nodes) > instance else None
         else:
-            node = _match_node_in_tree(tree, selector)
+            node = _match_node_in_tree(tree, selector, instance=instance)
         if node is None:
             return None
         attrs = extract_node_attributes(node)
@@ -456,6 +510,7 @@ class ComponentFinder:
                 "xpath 表达式无效: %s" % selector.xpath
             )
 
+        instance = selector.instance or 0
         deadline = time.monotonic() + max(timeout, 0.0)
         interval = 0.1
         xpath_matched = False
@@ -464,9 +519,9 @@ class ComponentFinder:
         while first_attempt or time.monotonic() < deadline:
             first_attempt = False
             nodes = self._query_xpath_nodes(selector)
-            if nodes:
+            if len(nodes) > instance:
                 xpath_matched = True
-                ref = self._anchor_node_to_ref(nodes[0])
+                ref = self._anchor_node_to_ref(nodes[instance])
                 if ref is not None:
                     return ref
 
@@ -603,42 +658,66 @@ def _format_selector(selector: SelectorSpec) -> str:
     return ", ".join(parts) if parts else str(selector)
 
 
-def _match_node_in_tree(tree: Dict[str, Any],
-                        selector: SelectorSpec) -> Optional[Dict[str, Any]]:
-    """在控件树中按 SelectorSpec 条件匹配第一个节点。
+def _match_node_in_tree(tree: Dict[str, Any], selector: SelectorSpec,
+                        instance: int = 0) -> Optional[Dict[str, Any]]:
+    """在控件树中按 SelectorSpec 条件匹配第 instance 个（0 起）节点。
 
-    支持 text/text_contains/resource_id/key/type/class_name 匹配，
+    支持全部文本/描述匹配字段（含正则）与 resource_id/key/type/class_name，
     不支持关系选择器和 xpath（那些走原有路径）。
     """
     results: List[Dict[str, Any]] = []
     _traverse_match(tree, selector, results)
-    return results[0] if results else None
+    return results[instance] if len(results) > instance else None
 
 
 def _traverse_match(node: Dict[str, Any], selector: SelectorSpec,
                     results: List[Dict[str, Any]]) -> None:
-    """深度优先遍历，收集匹配 selector 的节点。"""
+    """深度优先前序遍历，收集全部匹配 selector 的节点。
+
+    命中节点的子树继续下探，对齐设备端 findComponents 的匹配顺序，
+    保证 instance 语义一致。
+    """
     attrs = extract_node_attributes(node)
     if _node_matches_selector(attrs, selector):
         results.append(node)
-        return
     for child in node.get("children") or []:
         _traverse_match(child, selector, results)
 
 
+def _regex_search(pattern: str, value: str) -> bool:
+    """正则匹配，对齐设备端 MatchPattern.REGEXP 的 RegExp.test 搜索语义。
+
+    非法正则视为不匹配，不让脏输入炸掉整棵树的遍历。
+    """
+    try:
+        return re.search(pattern, value) is not None
+    except re.error:
+        logger.warning("正则表达式无效: %r", pattern)
+        return False
+
+
 def _node_matches_selector(attrs: Dict[str, Any], selector: SelectorSpec) -> bool:
-    """检查节点属性是否满足 selector 全部非空条件。"""
+    """检查节点属性是否满足 selector 全部非空条件。
+
+    必须覆盖 SelectorSpec 的全部匹配字段：任何被遗漏的字段都会让
+    仅含该字段的选择器在树上退化为"匹配一切"，静默命中根节点。
+    """
+    text = attrs.get("text") or ""
+    desc = attrs.get("description") or ""
     if selector.text is not None:
         if attrs.get("text") != selector.text:
             return False
     if selector.text_contains is not None:
-        if selector.text_contains not in (attrs.get("text") or ""):
+        if selector.text_contains not in text:
             return False
     if selector.text_starts_with is not None:
-        if not (attrs.get("text") or "").startswith(selector.text_starts_with):
+        if not text.startswith(selector.text_starts_with):
             return False
     if selector.text_ends_with is not None:
-        if not (attrs.get("text") or "").endswith(selector.text_ends_with):
+        if not text.endswith(selector.text_ends_with):
+            return False
+    if selector.text_matches is not None:
+        if not _regex_search(selector.text_matches, text):
             return False
     if selector.resource_id is not None:
         if attrs.get("id") != selector.resource_id:
@@ -656,7 +735,16 @@ def _node_matches_selector(attrs: Dict[str, Any], selector: SelectorSpec) -> boo
         if attrs.get("description") != selector.desc:
             return False
     if selector.desc_contains is not None:
-        if selector.desc_contains not in (attrs.get("description") or ""):
+        if selector.desc_contains not in desc:
+            return False
+    if selector.desc_starts_with is not None:
+        if not desc.startswith(selector.desc_starts_with):
+            return False
+    if selector.desc_ends_with is not None:
+        if not desc.endswith(selector.desc_ends_with):
+            return False
+    if selector.desc_matches is not None:
+        if not _regex_search(selector.desc_matches, desc):
             return False
     return True
 

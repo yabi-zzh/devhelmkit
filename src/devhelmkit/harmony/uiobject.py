@@ -394,9 +394,24 @@ class UiObject(BaseComponent):
 
     def drag_to_component(self, other: 'UiObject',
                           timeout: Optional[float] = None) -> None:
-        self._call_component(
-            "dragToComponent", [other._selector], timeout=timeout
-        )
+        """拖拽到另一控件。
+
+        设备端 Component.dragTo 接收目标控件的远程对象引用，须先把
+        目标选择器解析为 Component ref 再传参；直接传 SelectorSpec
+        无法 JSON 序列化且设备端不识别。
+        """
+        other_ref = other._resolve_component_ref(timeout)
+        self._call_component("dragTo", [other_ref], timeout=timeout)
+
+    def _resolve_component_ref(self, timeout: Optional[float] = None) -> str:
+        """查找并缓存本控件的设备端 Component 引用。"""
+        if self._component_ref is None:
+            self._component_ref = self._driver._finder.find_component(
+                self._selector,
+                timeout if timeout is not None
+                else self._driver._implicit_wait
+            )
+        return self._component_ref
 
     # ============================================================
     # 缩放类

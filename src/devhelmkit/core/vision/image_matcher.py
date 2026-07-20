@@ -228,9 +228,13 @@ class ImageMatcher:
             res = cv2.matchTemplate(resized, tpl_gray, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(res)
             if best is None or max_val > best.confidence:
+                # 匹配发生在缩放后的源图上，还原到原图坐标系时
+                # 左上角与宽高都必须除以 scale，否则中心点偏移导致点击脱靶
                 x = int(max_loc[0] / scale)
                 y = int(max_loc[1] / scale)
-                rect = Rect(left=x, top=y, right=x + w_tpl, bottom=y + h_tpl)
+                w_orig = int(round(w_tpl / scale))
+                h_orig = int(round(h_tpl / scale))
+                rect = Rect(left=x, top=y, right=x + w_orig, bottom=y + h_orig)
                 best = MatchResult(rect=rect, confidence=float(max_val), scale=scale)
             if max_val >= threshold:
                 break

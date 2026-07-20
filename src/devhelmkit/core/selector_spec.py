@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from devhelmkit.exceptions import DevhelmError
+
 
 @dataclass(frozen=True)
 class SelectorSpec:
@@ -96,7 +98,29 @@ def _normalize_aliases(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return {_ALIAS_MAPPING.get(key, key): value for key, value in kwargs.items()}
 
 
+# 设备端与客户端路径均未实现的字段：静默忽略会命中错误控件，必须显式拒绝
+_UNSUPPORTED_FIELD_HINTS = {
+    'index': "index 选择器在 HarmonyOS 平台不受支持，"
+             "请改用 instance=N（第 N 个匹配，0 起）",
+    'text_matches_flags': "text_matches_flags 不受支持，"
+                          "请将 flags 内联进正则（如 (?i) 忽略大小写）",
+}
+
+
 def build_selector(**kwargs) -> SelectorSpec:
-    """从用户 kwargs 构建 SelectorSpec（含别名归一化）。"""
+    """从用户 kwargs 构建 SelectorSpec（含别名归一化与字段校验）。
+
+    Raises:
+        DevhelmError: 传入不支持或未知的选择器字段。
+    """
     normalized = _normalize_aliases(kwargs)
-    return SelectorSpec(**normalized)
+    for field_name, hint in _UNSUPPORTED_FIELD_HINTS.items():
+        if normalized.get(field_name) is not None:
+            raise DevhelmError(hint)
+    try:
+        return SelectorSpec(**normalized)
+    except TypeError as e:
+        raise DevhelmError(
+            "未知的选择器字段: %s，支持的字段见 SelectorSpec 定义"
+            % sorted(set(normalized) - set(SelectorSpec.__dataclass_fields__))
+        ) from e
