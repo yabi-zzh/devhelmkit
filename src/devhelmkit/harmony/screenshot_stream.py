@@ -27,7 +27,6 @@ import os
 import random
 import socket
 import struct
-import subprocess
 import threading
 import time
 from datetime import datetime
@@ -227,7 +226,11 @@ class ScreenshotStream:
         self._perf_period_start = 0.0
         self._perf_diagnostics = _CaptureDiagnostics()
 
-        # 录屏状态
+        # 录屏状态：全部读写由 _record_lock 保护，与帧缓存锁分离，
+        # 避免录屏落盘 I/O 阻塞 MJPEG 消费端的帧等待。
+        # 锁获取顺序约定：_record_lock -> _frame_lock（仅 start_recording 嵌套），
+        # 接收线程对两把锁只做先后独立获取、从不嵌套，因此不存在环路死锁。
+        self._record_lock = threading.Lock()
         self._recording: bool = False
         self._record_dir: Optional[str] = None
         self._record_output_dir: Optional[str] = None
@@ -269,10 +272,16 @@ class ScreenshotStream:
 
             if attempt < max_retries:
                 try:
-                    logger.info("ScreenshotStream 尝试清理设备端 uitest 残留进程...")
-                    self._device.shell("killall -9 uitest")
+                    # 精准清理推流依赖的 uitest 守护进程（start-daemon singleness），
+                    # 不能 killall uitest：会误杀设备上其他 uitest 进程（如并发的
+                    # dumpLayout / screenCap 命令进程）。
+                    logger.info("ScreenshotStream 尝试清理设备端 uitest 守护进程...")
+                    self._device.agent.stop_daemon()
+                    # daemon 已被杀，旧 RPC 长连接必然已死：
+                    # 主动置 BROKEN 让下一次 rpc_call 直接重建，而非失败一次
+                    self._device.reset_connection()
                 except Exception as ex:
-                    logger.warning("清理设备端 uitest 进程异常: %s", ex)
+                    logger.warning("清理设备端 uitest 守护进程异常: %s", ex)
                 time.sleep(1.0)
 
         logger.error("ScreenshotStream 最终启动失败")
@@ -318,12 +327,25 @@ class ScreenshotStream:
         帧到即返回，消除消费端固定轮询延迟；timeout 秒内无新帧则返回当前
         (seq, frame)，供消费端做心跳与断连探测。未推流返回 (当前序号, None)。
         并发 stop() 会 notify 唤醒等待者，避免卡满整个 timeout。
+
+        实现为带 deadline 的条件循环：Condition.wait 可能被无关 notify
+        （如 stop 唤醒、虚假唤醒）提前打断，单次 wait 会导致消费端拿到
+        旧帧立即重入、静止画面下空转吃满 CPU。循环直到出现新帧、流停止
+        或到达 deadline 才返回。
         """
         if not self._streaming:
             return self._frame_seq, None
+        deadline = time.monotonic() + timeout
         with self._frame_cond:
-            if self._frame_seq == last_seq and self._streaming:
-                self._frame_cond.wait(timeout)
+            while (self._streaming and
+                   (self._latest_frame is None or self._frame_seq == last_seq)):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._frame_cond.wait(remaining)
+            if not self._streaming:
+                # 流已停止：返回 None 帧，让消费端走退避分支而非复推旧帧
+                return self._frame_seq, None
             return self._frame_seq, self._latest_frame
 
     # ============================================================
@@ -342,10 +364,6 @@ class ScreenshotStream:
         if not self._streaming:
             raise DevhelmError("推流未启动，无法开始录屏")
 
-        if self._recording:
-            logger.warning("录屏已在进行中，忽略重复调用")
-            return
-
         # 预检 OpenCV 可用性，避免录屏结束后合成阶段才发现依赖缺失
         try:
             import cv2  # noqa: F401
@@ -356,27 +374,35 @@ class ScreenshotStream:
 
         frames_dir = os.path.join(output_dir, "frames")
         os.makedirs(frames_dir, exist_ok=True)
-        self._record_dir = frames_dir
-        self._record_output_dir = output_dir
-        self._record_frame_count = 0
-        self._record_start_time = time.time()
-        self._record_timestamps = []
-        self._recording = True
 
-        # 将当前缓存帧落盘作为首帧，避免静置画面时录屏 0 帧
-        with self._frame_lock:
-            current_frame = self._latest_frame
-        if current_frame is not None:
-            frame_path = os.path.join(self._record_dir, "frame_000000.jpg")
-            try:
-                with open(frame_path, 'wb') as f:
-                    f.write(current_frame)
-                self._record_timestamps.append(0.0)
-                self._record_frame_count = 1
-            except OSError as e:
-                logger.warning("录屏首帧写入失败: %s", e)
+        # 首帧写入与状态翻转在 _record_lock 内完成：接收线程在锁外阻塞，
+        # 保证 frame_000000 不会被并发帧覆盖、时间戳列表保持单调递增
+        with self._record_lock:
+            if self._recording:
+                logger.warning("录屏已在进行中，忽略重复调用")
+                return
+            # 锁序：_record_lock -> _frame_lock，与全局约定一致
+            with self._frame_lock:
+                current_frame = self._latest_frame
+            self._record_dir = frames_dir
+            self._record_output_dir = output_dir
+            self._record_frame_count = 0
+            self._record_start_time = time.time()
+            self._record_timestamps = []
 
-        logger.debug("录屏开始 (dir=%s)", self._record_dir)
+            # 将当前缓存帧落盘作为首帧，避免静置画面时录屏 0 帧
+            if current_frame is not None:
+                frame_path = os.path.join(frames_dir, "frame_000000.jpg")
+                try:
+                    with open(frame_path, 'wb') as f:
+                        f.write(current_frame)
+                    self._record_timestamps.append(0.0)
+                    self._record_frame_count = 1
+                except OSError as e:
+                    logger.warning("录屏首帧写入失败: %s", e)
+            self._recording = True
+
+        logger.debug("录屏开始 (dir=%s)", frames_dir)
 
     def stop_recording(self, output_path: str) -> str:
         """停止录屏并将帧序列合成为视频文件。
@@ -390,29 +416,36 @@ class ScreenshotStream:
         Raises:
             DevhelmError: 未在录屏或无帧数据
         """
-        if not self._recording:
-            raise DevhelmError("未在录屏状态")
+        # 状态判定、翻转与快照在 _record_lock 内原子完成：接收线程要么在
+        # 翻转前完整写完一帧，要么翻转后直接跳过，不会出现 _record_dir 已置
+        # None 而 _recording 仍为 True 的中间窗口（os.path.join(None) 崩溃）
+        with self._record_lock:
+            if not self._recording:
+                raise DevhelmError("未在录屏状态")
 
-        self._recording = False
-        self._record_end_time = time.time()
-        frame_count = self._record_frame_count
-        record_dir = self._record_dir
-        timestamps = self._record_timestamps
-        self._record_frame_count = 0
-        self._record_dir = None
-        self._record_output_dir = None
-        self._record_timestamps = []
+            self._recording = False
+            self._record_end_time = time.time()
+            frame_count = self._record_frame_count
+            record_dir = self._record_dir
+            timestamps = self._record_timestamps
+            start_time = self._record_start_time
+            end_time = self._record_end_time
+            self._record_frame_count = 0
+            self._record_dir = None
+            self._record_output_dir = None
+            self._record_timestamps = []
 
         if frame_count == 0:
             raise DevhelmError("录屏期间未捕获到任何帧")
 
-        duration = self._record_end_time - self._record_start_time
+        duration = end_time - start_time
         logger.debug("录屏结束: %d 帧, %.1fs, 合成中（含补帧）...",
                     frame_count, duration)
 
+        # 视频合成是长耗时 CPU 任务，放在锁外执行，此时状态已快照且录屏已关闭
         total_frames = self._compose_video(
             record_dir, frame_count, timestamps,
-            self._record_start_time, self._record_end_time,
+            start_time, end_time,
             output_path
         )
 
@@ -486,8 +519,10 @@ class ScreenshotStream:
         else:
             ts_array = np.array([0.0])
 
-        # 帧缓存：避免补帧时重复 imread 同一文件
-        frame_cache: dict = {}
+        # 单帧缓存：idx 随时间轴单调不减，只需保留上一次解码结果即可避免
+        # 补帧时重复 imread；缓存全部 BGR ndarray 会让长录屏内存无界增长
+        last_idx = -1
+        last_frame = None
 
         try:
             for i in range(total_frames):
@@ -501,13 +536,12 @@ class ScreenshotStream:
                 if idx >= frame_count:
                     idx = frame_count - 1
 
-                # 从缓存读取，避免重复磁盘 IO
-                if idx not in frame_cache:
+                if idx != last_idx:
                     frame_path = os.path.join(record_dir, "frame_%06d.jpg" % idx)
-                    frame_cache[idx] = cv2.imread(frame_path)
-                frame = frame_cache[idx]
-                if frame is not None:
-                    writer.write(frame)
+                    last_frame = cv2.imread(frame_path)
+                    last_idx = idx
+                if last_frame is not None:
+                    writer.write(last_frame)
         finally:
             writer.release()
 
@@ -515,17 +549,17 @@ class ScreenshotStream:
 
     def stop(self) -> None:
         """停止推流并释放资源。"""
-        # 如果正在录屏，先停止录屏（不合成视频）
-        self._recording = False
-        self._record_dir = None
-        self._record_output_dir = None
-        self._record_frame_count = 0
-        self._record_timestamps = []
+        # 如果正在录屏，先停止录屏（不合成视频）；与接收线程的落盘分支互斥
+        with self._record_lock:
+            self._recording = False
+            self._record_dir = None
+            self._record_output_dir = None
+            self._record_frame_count = 0
+            self._record_timestamps = []
 
-        self._streaming = False
-
-        # 唤醒 wait_frame_bytes_seq 的等待者，避免推流停止后仍卡满 timeout
+        # 置停止标志并唤醒 wait_frame_bytes_seq 的等待者，避免卡满 timeout
         with self._frame_cond:
+            self._streaming = False
             self._frame_cond.notify_all()
 
         # 先发送 stopCaptureScreen 停止推流
@@ -538,9 +572,18 @@ class ScreenshotStream:
         self._close_socket()
 
         # 等待接收线程退出（socket 已关，应立即返回）
+        thread_exited = True
         if self._thread is not None:
             self._thread.join(timeout=1.0)
-            self._thread = None
+            if self._thread.is_alive():
+                # join 超时：线程可能仍在读写 _recv_buffer，保留线程引用与
+                # 缓冲区，避免与存活线程并发改写同一 bytearray；线程为
+                # daemon，socket 已关闭后会自行收敛退出
+                thread_exited = False
+                logger.warning(
+                    "ScreenshotStream 接收线程未在 1s 内退出，保留缓冲待其自行收敛")
+            else:
+                self._thread = None
 
         # 清理端口转发
         self._cleanup_fport()
@@ -548,7 +591,15 @@ class ScreenshotStream:
         with self._frame_lock:
             self._latest_frame = None
         self._frame_event.clear()
-        self._recv_buffer.clear()
+        if thread_exited:
+            self._recv_buffer.clear()
+
+        # 推流会话结束时设备端 daemon 可能同时掐断 RPC 长连接（实测），
+        # 主动重置让下一次 rpc_call 直接重建，而非先吃一次断连异常
+        try:
+            self._device.reset_connection()
+        except Exception as e:
+            logger.debug("重置 RPC 连接异常（忽略）: %s", e)
 
         logger.debug("ScreenshotStream 已停止")
 
@@ -563,7 +614,7 @@ class ScreenshotStream:
         （毫秒级）互不依赖，可并行执行，把 fport 开销藏进 daemon 启动等待窗口。
         socket.connect 需设备端 socket 已监听，故放在两者 join 之后。
         """
-        agent = self._device._agent
+        agent = self._device.agent
         # 先探测协议版本：fport 目标名依赖 protocol_version，且需在并行前就绪，
         # 避免 daemon 线程与主线程竞争写 _abi/_protocol_version。
         if agent.protocol_version is None:
@@ -589,10 +640,7 @@ class ScreenshotStream:
         s.close()
 
         target = self._get_fport_target()
-        subprocess.run(
-            self._device._hdc_cmd("fport", "tcp:%d" % self._local_port, target),
-            check=True
-        )
+        self._device.fport(self._local_port, target)
         self._fport_established = True
 
         # 等 daemon 就绪；连接前必须确保设备端 socket 已监听
@@ -667,45 +715,60 @@ class ScreenshotStream:
         self._thread.start()
 
     def _recv_loop(self) -> None:
-        """后台接收循环：从 socket 读取数据，解析 JPEG 帧，缓存最新帧。"""
-        logger.debug("ScreenshotStream 接收线程启动")
-        while self._streaming and self._sock is not None:
-            try:
-                recv_started = time.perf_counter() if _PERF_ENABLED else 0.0
-                chunk = self._sock.recv(65536)
-                recv_finished = time.perf_counter() if _PERF_ENABLED else 0.0
-                if not chunk:
-                    logger.warning("ScreenshotStream socket 对端关闭")
-                    break
-                self._recv_buffer.extend(chunk)
-                if _PERF_ENABLED:
-                    self._perf_diagnostics.record_recv(
-                        (recv_finished - recv_started) * 1000.0,
-                        len(chunk),
-                        len(self._recv_buffer),
-                        recv_finished,
-                    )
-                    parse_started = time.perf_counter()
-                self._parse_frames()
-                if _PERF_ENABLED:
-                    parse_ms = (time.perf_counter() - parse_started) * 1000.0
-                    self._perf_diagnostics.record_parse(
-                        parse_ms, len(self._recv_buffer)
-                    )
-                    self._perf_diagnostics.maybe_log(len(self._recv_buffer))
-            except OSError as e:
-                if self._streaming:
-                    logger.warning("ScreenshotStream 接收异常: %s", e)
-                break
+        """后台接收循环：从 socket 读取数据，解析 JPEG 帧，缓存最新帧。
 
-        if _PERF_ENABLED:
-            self._perf_diagnostics.maybe_log(
-                len(self._recv_buffer), force=True
-            )
-        with self._frame_cond:
-            self._streaming = False
-            self._frame_cond.notify_all()
-        logger.debug("ScreenshotStream 接收线程退出")
+        退出收敛统一放在 finally：无论对端关闭、OSError 还是解析路径抛出
+        未预期异常，都保证 _streaming 置 False 并 notify_all 唤醒消费者，
+        避免等待帧的线程卡满 timeout 甚至永久阻塞。
+        """
+        logger.debug("ScreenshotStream 接收线程启动")
+        # 绑定本线程所属的 socket：stop 超时后残留的旧线程不会误读新会话
+        # 的 socket，也不会在 finally 中误停新会话的推流
+        sock = self._sock
+        try:
+            while self._streaming and self._sock is sock and sock is not None:
+                try:
+                    recv_started = time.perf_counter() if _PERF_ENABLED else 0.0
+                    chunk = sock.recv(65536)
+                    recv_finished = time.perf_counter() if _PERF_ENABLED else 0.0
+                    if not chunk:
+                        logger.warning("ScreenshotStream socket 对端关闭")
+                        break
+                    self._recv_buffer.extend(chunk)
+                    if _PERF_ENABLED:
+                        self._perf_diagnostics.record_recv(
+                            (recv_finished - recv_started) * 1000.0,
+                            len(chunk),
+                            len(self._recv_buffer),
+                            recv_finished,
+                        )
+                    # 无条件初始化：set_perf_enabled 恰在前后两个 _PERF_ENABLED
+                    # 判断之间生效时，parse_started 未定义会以 NameError 杀死线程
+                    parse_started = time.perf_counter()
+                    self._parse_frames()
+                    if _PERF_ENABLED:
+                        parse_ms = (time.perf_counter() - parse_started) * 1000.0
+                        self._perf_diagnostics.record_parse(
+                            parse_ms, len(self._recv_buffer)
+                        )
+                        self._perf_diagnostics.maybe_log(len(self._recv_buffer))
+                except OSError as e:
+                    if self._streaming:
+                        logger.warning("ScreenshotStream 接收异常: %s", e)
+                    break
+        except Exception:
+            logger.exception("ScreenshotStream 接收线程异常退出")
+        finally:
+            if _PERF_ENABLED:
+                self._perf_diagnostics.maybe_log(
+                    len(self._recv_buffer), force=True
+                )
+            with self._frame_cond:
+                # 仅当仍属于本会话时收敛状态；新会话已换 socket 则不干预
+                if self._sock is sock or self._sock is None:
+                    self._streaming = False
+                self._frame_cond.notify_all()
+            logger.debug("ScreenshotStream 接收线程退出")
 
     def _parse_frames(self) -> None:
         """从接收缓冲区中解析数据帧。
@@ -823,13 +886,15 @@ class ScreenshotStream:
         """
         soi = self._recv_buffer.find(JPEG_SOI)
         if soi < 0:
-            # 没有 JPEG 开头，也没有协议帧 HEAD，清空垃圾数据
-            # 但保留最后几个字节防止跨 chunk 的标记被截断
-            if len(self._recv_buffer) > 4:
-                discarded = len(self._recv_buffer) - 4
+            # 没有 JPEG 开头，也没有协议帧 HEAD，清空垃圾数据。
+            # 保留 len(RPC_HEAD)-1 字节：RPC_HEAD 长 28 字节，跨 chunk 被
+            # 截断的帧头最多残留 27 字节，保留不足则会丢弃帧头前缀导致丢帧
+            keep = len(RPC_HEAD) - 1
+            if len(self._recv_buffer) > keep:
+                discarded = len(self._recv_buffer) - keep
                 if _PERF_ENABLED:
                     self._perf_diagnostics.record_discard(discarded)
-                del self._recv_buffer[:-4]
+                del self._recv_buffer[:-keep]
             if _PERF_ENABLED:
                 self._perf_diagnostics.raw_waits += 1
             return 0
@@ -877,18 +942,23 @@ class ScreenshotStream:
         if _PERF_ENABLED:
             self._perf_on_frame(len(frame_data))
 
-        if self._recording and self._record_dir is not None:
-            frame_path = os.path.join(
-                self._record_dir,
-                "frame_%06d.jpg" % self._record_frame_count
-            )
-            try:
-                with open(frame_path, 'wb') as f:
-                    f.write(frame_data)
-                self._record_timestamps.append(time.time() - self._record_start_time)
-                self._record_frame_count += 1
-            except OSError as e:
-                logger.warning("录屏帧写入失败: %s", e)
+        # 录屏分支整体持 _record_lock：状态判定、落盘、计数与时间戳追加
+        # 原子完成，与 start/stop_recording 的状态翻转互斥（不与 _frame_lock
+        # 嵌套，见 __init__ 中的锁序约定）
+        with self._record_lock:
+            if self._recording and self._record_dir is not None:
+                frame_path = os.path.join(
+                    self._record_dir,
+                    "frame_%06d.jpg" % self._record_frame_count
+                )
+                try:
+                    with open(frame_path, 'wb') as f:
+                        f.write(frame_data)
+                    self._record_timestamps.append(
+                        time.time() - self._record_start_time)
+                    self._record_frame_count += 1
+                except OSError as e:
+                    logger.warning("录屏帧写入失败: %s", e)
 
     def _perf_on_frame(self, frame_bytes: int) -> None:
         """生产端帧率统计：周期性输出设备到帧的实际 fps 与帧间隔。
@@ -935,11 +1005,7 @@ class ScreenshotStream:
 
         target = self._get_fport_target()
         try:
-            subprocess.run(
-                self._device._hdc_cmd("fport", "rm",
-                                      "tcp:%d" % self._local_port, target),
-                check=False
-            )
+            self._device.fport_rm(self._local_port, target)
         except Exception as e:
             logger.debug("清理截图端口转发异常（忽略）: %s", e)
 
@@ -948,7 +1014,7 @@ class ScreenshotStream:
 
     def _get_fport_target(self) -> str:
         """获取 fport 转发目标地址，与 RPC 通道使用相同设备端 socket。"""
-        if self._device._agent.protocol_version and \
-                self._device._agent.protocol_version >= 2:
+        agent = self._device.agent
+        if agent.protocol_version and agent.protocol_version >= 2:
             return "localabstract:%s" % UITEST_SOCKET_NAME
         return "tcp:%d" % RPC_PORT
