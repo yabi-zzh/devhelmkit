@@ -324,6 +324,17 @@ class UiViewerSession:
                     self._warmup_stream_locked()
                 else:
                     self._stop_stream_locked()
+            if self._mode == CaptureMode.LIVE:
+                # 离开 LIVE：录制依赖实时模式（start_recording 强制校验），
+                # 必须同步终止，否则 record_web_action 在 snapshot 下仍会
+                # 追加事件；已生成事件保留，供前端通过录制状态接口回收
+                if self._recording:
+                    self._recording = False
+                    logger.info("离开实时模式，Web 操作录制已自动停止: %s",
+                                self._serial)
+                # hierarchy 历史绑定实时页面，模式切换后即失效，清空防止
+                # 后续录制按 snapshot_id 误绑到过期快照
+                self._hierarchy_history.clear()
             self._mode = mode
             self._last_jpeg_bytes = None
             self._last_frame_meta = None
@@ -493,6 +504,10 @@ class UiViewerSession:
             if self._mode != CaptureMode.LIVE:
                 raise RuntimeError("snapshot 模式不支持触控操作")
             self._used_live_capability = True
+
+            # 第一阶段：整批校验与归一化。任一事件非法则整批拒绝，
+            # 避免执行到一半才校验失败，在设备上残留 down 无 up 的悬挂触点
+            normalized = []
             for event in events:
                 try:
                     event_type = TouchEventType(event.get("type", ""))
@@ -500,12 +515,30 @@ class UiViewerSession:
                     raise RuntimeError("未知 touch 事件类型: %s" % event.get("type"))
                 x, y = self._normalize_touch_point(event)
                 event["x"], event["y"] = x, y
-                if event_type == TouchEventType.DOWN:
-                    self._driver.touch_down(x, y)
-                elif event_type == TouchEventType.MOVE:
-                    self._driver.touch_move(x, y)
-                elif event_type == TouchEventType.UP:
-                    self._driver.touch_up(x, y)
+                normalized.append((event_type, x, y))
+
+            # 第二阶段：顺序执行。设备调用中途异常时，若已发 down 且未发
+            # 对应 up，在最后成功坐标补发 touch_up 兜底，恢复设备触点状态
+            pending_down = False
+            last_x, last_y = 0, 0
+            try:
+                for event_type, x, y in normalized:
+                    if event_type == TouchEventType.DOWN:
+                        self._driver.touch_down(x, y)
+                        pending_down = True
+                    elif event_type == TouchEventType.MOVE:
+                        self._driver.touch_move(x, y)
+                    elif event_type == TouchEventType.UP:
+                        self._driver.touch_up(x, y)
+                        pending_down = False
+                    last_x, last_y = x, y
+            except Exception:
+                if pending_down:
+                    try:
+                        self._driver.touch_up(last_x, last_y)
+                    except Exception as up_exc:
+                        logger.warning("touch 兜底 touch_up 失败: %s", up_exc)
+                raise
 
     # ============================================================
     # 设备按键

@@ -206,10 +206,15 @@ class ControlRequestHandler(BaseHTTPRequestHandler):
             self._json_error(400, "missing serial")
             return
         logger.info("选择设备: %s", serial)
-        session = self.registry.get_or_create_session(serial)
-        if not session.active:
-            session.start()
-        self._json_response(session.get_state())
+        try:
+            # registry 层原子完成"获取或创建并启动"，规避与 close_session
+            # 竞态产生孤儿 driver；start 涉及设备连接，失败必须返回 JSON 500
+            # 而非让客户端收到裸断连
+            session = self.registry.get_or_create_started_session(serial)
+            self._json_response(session.get_state())
+        except Exception as e:
+            logger.warning("选择设备失败: %s - %s", serial, e)
+            self._json_error(500, str(e))
 
     def _api_session_mode(self, body: dict):
         """切换指定设备的 snapshot/live 采集模式。"""

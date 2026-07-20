@@ -12,10 +12,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+# parse_bounds 下沉到 bounds 模块与 protocol 共享；此处 re-export 保持
+# 既有导入路径（from node_model import parse_bounds）不变
+from devhelmkit.uiviewer.bounds import Bounds, parse_bounds  # noqa: F401
 from devhelmkit.uiviewer.protocol import extract_hierarchy_attributes
 
 _VALID_XML_NAME_RE = re.compile(r"^[A-Za-z_][\w.\-]*$")
-_BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 _FALLBACK_TAG = "orgRoot"
 _INTERACTIVE_TYPE_VALUES = {
     "Button",
@@ -29,7 +31,6 @@ _INTERACTIVE_TYPE_VALUES = {
     "Toggle",
 }
 
-Bounds = Dict[str, int]
 XPathCandidate = Dict[str, Any]
 
 
@@ -379,40 +380,6 @@ def _walk(
             node.children_ids.append(child_id)
 
     return node_id
-
-
-def parse_bounds(raw: Any) -> Optional[Bounds]:
-    """解析多种 bounds 形态为统一矩形。"""
-    if isinstance(raw, str):
-        match = _BOUNDS_RE.search(raw)
-        if match:
-            return {
-                "left": int(match.group(1)),
-                "top": int(match.group(2)),
-                "right": int(match.group(3)),
-                "bottom": int(match.group(4)),
-            }
-    if isinstance(raw, (list, tuple)) and len(raw) >= 4:
-        try:
-            return {
-                "left": int(raw[0]),
-                "top": int(raw[1]),
-                "right": int(raw[2]),
-                "bottom": int(raw[3]),
-            }
-        except (TypeError, ValueError):
-            return None
-    if isinstance(raw, dict):
-        try:
-            return {
-                "left": int(raw.get("left", 0)),
-                "top": int(raw.get("top", 0)),
-                "right": int(raw.get("right", 0)),
-                "bottom": int(raw.get("bottom", 0)),
-            }
-        except (TypeError, ValueError):
-            return None
-    return None
 
 
 def _build_tag_xpath(target: UiNode, nodes: List[UiNode]) -> Optional[XPathCandidate]:

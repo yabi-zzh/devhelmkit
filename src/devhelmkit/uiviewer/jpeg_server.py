@@ -149,11 +149,16 @@ class JpegRequestHandler(BaseHTTPRequestHandler):
                         if write_ms > 20.0:
                             perf.log("[perf] mjpeg slow write: %.1fms size=%.1fKB",
                                      write_ms, len(frame) / 1024.0)
-                elif time.time() - last_frame_ts >= 5.0:
-                    # 长时间无新帧时发送空白注释行做心跳，探测断连
-                    last_frame_ts = time.time()
-                    self.wfile.write(b"\r\n")
-                    self.wfile.flush()
+                else:
+                    if time.time() - last_frame_ts >= 5.0:
+                        # 长时间无新帧时发送空白注释行做心跳，探测断连
+                        last_frame_ts = time.time()
+                        self.wfile.write(b"\r\n")
+                        self.wfile.flush()
+                    if frame is None:
+                        # 流未就绪或已停止时 wait 会立即返回，短暂退避防止
+                        # 本连接线程忙等自旋吃满 CPU（与底层条件循环双保险）
+                        time.sleep(0.05)
         except (BrokenPipeError, ConnectionResetError):
             # 浏览器关闭或切换 MJPEG 地址属于正常的流生命周期。
             return

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
+from devhelmkit.uiviewer.bounds import parse_bounds
+
 
 class CaptureMode(str, Enum):
     """采集模式。
@@ -167,7 +169,9 @@ def flatten_hierarchy(root: Dict[str, Any],
             "children_ids": [],
         }
 
-        bounds = _extract_bounds(attrs if isinstance(attrs, dict) else node)
+        # 复用 bounds 模块的统一解析：支持负坐标且对非法输入有防御
+        source_attrs = attrs if isinstance(attrs, dict) else node
+        bounds = parse_bounds(source_attrs.get("bounds"))
         if bounds is not None:
             flat_node["bounds"] = bounds
 
@@ -181,35 +185,3 @@ def flatten_hierarchy(root: Dict[str, Any],
 
     _walk(root, parent_id, path_prefix)
     return nodes
-
-
-def _extract_bounds(attrs: Dict[str, Any]) -> Optional[Dict[str, int]]:
-    """从节点属性中提取 bounds。"""
-    bounds = attrs.get("bounds")
-    if bounds is None:
-        return None
-    if isinstance(bounds, str):
-        import re
-        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
-        if m:
-            return {
-                "left": int(m.group(1)),
-                "top": int(m.group(2)),
-                "right": int(m.group(3)),
-                "bottom": int(m.group(4)),
-            }
-    if isinstance(bounds, (list, tuple)) and len(bounds) >= 4:
-        return {
-            "left": int(bounds[0]),
-            "top": int(bounds[1]),
-            "right": int(bounds[2]),
-            "bottom": int(bounds[3]),
-        }
-    if isinstance(bounds, dict):
-        return {
-            "left": int(bounds.get("left", 0)),
-            "top": int(bounds.get("top", 0)),
-            "right": int(bounds.get("right", 0)),
-            "bottom": int(bounds.get("bottom", 0)),
-        }
-    return None
