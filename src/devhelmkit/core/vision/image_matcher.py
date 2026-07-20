@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import io
 import logging
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Optional, Tuple, Union, TYPE_CHECKING
 
 from devhelmkit.exceptions import DevhelmError
 from devhelmkit.model.rect import Rect
@@ -103,7 +103,9 @@ class ImageMatcher:
               region: Optional[Rect] = None,
               multi_scale: bool = True,
               mode: str = "template",
-              min_match_count: int = 8) -> Optional[MatchResult]:
+              min_match_count: int = 8,
+              scale_range: Optional[Tuple[float, float]] = None
+              ) -> Optional[MatchResult]:
         """在 source 中查找 template。
 
         Args:
@@ -114,6 +116,7 @@ class ImageMatcher:
             multi_scale: template 模式下启用多尺度兜底
             mode: template 或 feature
             min_match_count: feature 模式下的最少有效特征点数
+            scale_range: 多尺度搜索的缩放区间 (lo, hi)，None 用默认 3 档
 
         Returns:
             MatchResult 或 None
@@ -133,7 +136,8 @@ class ImageMatcher:
 
         match_mode = mode.strip().lower()
         if match_mode == "template":
-            result = cls._match_template(src, tpl, threshold, multi_scale)
+            result = cls._match_template(src, tpl, threshold, multi_scale,
+                                         scale_range)
         elif match_mode == "feature":
             result = cls._match_feature(src, tpl, threshold, min_match_count)
         else:
@@ -150,14 +154,16 @@ class ImageMatcher:
 
     @classmethod
     def _match_template(cls, src, tpl, threshold: float,
-                        multi_scale: bool) -> Optional[MatchResult]:
+                        multi_scale: bool,
+                        scale_range: Optional[Tuple[float, float]] = None
+                        ) -> Optional[MatchResult]:
         """模板匹配。"""
         result = cls._match_single_scale(src, tpl, threshold)
         if result is not None and cls._color_check(src, tpl, result.rect):
             return result
         if not multi_scale:
             return None
-        result = cls._match_multi_scale(src, tpl, threshold)
+        result = cls._match_multi_scale(src, tpl, threshold, scale_range)
         if result is None:
             return None
         if not cls._color_check(src, tpl, result.rect):
@@ -180,9 +186,29 @@ class ImageMatcher:
                     right=max_loc[0] + w, bottom=max_loc[1] + h)
         return MatchResult(rect=rect, confidence=float(max_val), scale=1.0)
 
+    @staticmethod
+    def _resolve_scales(scale_range: Optional[Tuple[float, float]]
+                        ) -> Tuple[float, ...]:
+        """把缩放区间解析为待搜索的尺度序列。
+
+        None 用默认 3 档 (0.9, 1.0, 1.1)；给定 (lo, hi) 在闭区间内均匀采样
+        5 档；区间退化（lo≈hi）时只取单尺度。
+        """
+        if scale_range is None:
+            return (0.9, 1.0, 1.1)
+        lo, hi = float(scale_range[0]), float(scale_range[1])
+        if hi < lo:
+            lo, hi = hi, lo
+        if hi - lo < 1e-6:
+            return (lo,)
+        steps = 5
+        return tuple(lo + (hi - lo) * i / (steps - 1) for i in range(steps))
+
     @classmethod
-    def _match_multi_scale(cls, src, tpl, threshold) -> Optional[MatchResult]:
-        """多尺度灰度匹配（0.9-1.1，3 级）。"""
+    def _match_multi_scale(cls, src, tpl, threshold,
+                           scale_range: Optional[Tuple[float, float]] = None
+                           ) -> Optional[MatchResult]:
+        """多尺度灰度匹配，尺度序列由 scale_range 决定。"""
         import cv2
 
         src_gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
@@ -190,7 +216,7 @@ class ImageMatcher:
         h_tpl, w_tpl = tpl_gray.shape
 
         best = None
-        for scale in (0.9, 1.0, 1.1):
+        for scale in cls._resolve_scales(scale_range):
             if scale != 1.0:
                 resized = cv2.resize(src_gray, None, fx=scale, fy=scale,
                                      interpolation=cv2.INTER_AREA)

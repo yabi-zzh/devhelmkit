@@ -17,6 +17,8 @@ from devhelmkit.exceptions import (
     BackendObjectDroppedError,
     ComponentNotFoundError,
 )
+from devhelmkit.harmony.config import ClearTextMode
+from devhelmkit.model.keys import KeyCode
 from devhelmkit.model.rect import Rect
 
 if TYPE_CHECKING:
@@ -137,13 +139,40 @@ class UiObject(BaseComponent):
 
     def set_text(self, text: str,
                  timeout: Optional[float] = None) -> None:
+        """设置文本。
+
+        clear_text_before_input 为真时先清空（清空方式由 clear_text_mode
+        决定）再输入，使 set_text 表现为"替换"而非"追加"。
+        """
+        if self._driver._config.clear_text_before_input:
+            self.clear_text(timeout=timeout)
         self._call_component("inputText", [text], timeout=timeout)
 
     def get_text(self, timeout: Optional[float] = None) -> str:
         return self._call_component("getText", timeout=timeout)
 
     def clear_text(self, timeout: Optional[float] = None) -> None:
-        self._call_component("clearText", timeout=timeout)
+        """清空文本。
+
+        clear_text_mode=once 走设备端 clearText；select_all 聚焦后全选
+        （Ctrl+A）再按删除键清空，兜底部分 clearText 不生效的输入框。
+        """
+        if self._driver._config.clear_text_mode == ClearTextMode.SELECT_ALL:
+            self._clear_text_by_select_all(timeout=timeout)
+        else:
+            self._call_component("clearText", timeout=timeout)
+
+    def _clear_text_by_select_all(self,
+                                  timeout: Optional[float] = None) -> None:
+        """全选后按删除键清空：聚焦控件 → Ctrl+A 全选 → 删除键一次删除选中。
+
+        相比逐字符退格（O(N) 次按键），全选+删除为 O(1) 次操作，长文本更快。
+        """
+        self._call_component("click", timeout=timeout)
+        self._driver.press_combination_key(
+            int(KeyCode.CTRL_LEFT), int(KeyCode.A)
+        )
+        self._driver.press_keycode(int(KeyCode.DEL))
 
     def input_text(self, text: str,
                    timeout: Optional[float] = None) -> None:
@@ -164,21 +193,45 @@ class UiObject(BaseComponent):
 
     def wait_enabled(self, timeout: Optional[float] = None) -> bool:
         """等待控件变为可用。"""
-        return self.wait_until(
-            lambda info: bool(info.get("enabled")), timeout=timeout
-        )
+        return self._wait_component_property("isEnabled", True, timeout)
 
     def wait_disabled(self, timeout: Optional[float] = None) -> bool:
         """等待控件变为禁用。"""
-        return self.wait_until(
-            lambda info: info.get("enabled") is False, timeout=timeout
-        )
+        return self._wait_component_property("isEnabled", False, timeout)
 
     def wait_clickable(self, timeout: Optional[float] = None) -> bool:
         """等待控件变为可点击。"""
-        return self.wait_until(
-            lambda info: bool(info.get("clickable")), timeout=timeout
-        )
+        return self._wait_component_property("isClickable", True, timeout)
+
+    def _wait_component_property(self, method: str, expected: bool,
+                                timeout: Optional[float] = None) -> bool:
+        """在统一 deadline 内轮询单个布尔属性，复用 Component ref。
+
+        相比经 info 每轮全量 dump 控件树，这里每轮仅在命中的控件引用上读
+        目标布尔属性（如 isEnabled/isClickable）一次，且属性来源与 click
+        等操作同为设备端 waitForComponent 命中的控件，避免树匹配与操作
+        匹配错位。控件暂不存在时视为未满足，继续等待至超时。
+        """
+        wait_timeout = self._resolve_wait_timeout(timeout)
+        deadline = time.monotonic() + wait_timeout
+        interval = 0.1
+        first_attempt = True
+
+        while first_attempt or time.monotonic() < deadline:
+            first_attempt = False
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                value = self._call_component(method, timeout=remaining)
+                if bool(value) == expected:
+                    return True
+            except ComponentNotFoundError:
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
+            interval = min(interval * 2, 0.5)
+        return False
 
     def wait_until(self, condition: Callable[[dict], bool],
                    timeout: Optional[float] = None) -> bool:

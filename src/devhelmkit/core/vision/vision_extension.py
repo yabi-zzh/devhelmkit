@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import List, Optional, Union, TYPE_CHECKING
+from typing import List, Optional, Tuple, Union, TYPE_CHECKING
 
 from devhelmkit.core.vision.image_matcher import ImageMatcher
 from devhelmkit.exceptions import DevhelmError
@@ -92,6 +92,30 @@ class VisionExtension:
         return getattr(self._driver, '_implicit_wait', 10.0)
 
     # ============================================================
+    # 低延迟截图通道（轮询查找加速）
+    # ============================================================
+
+    def _try_begin_fast_capture(self) -> bool:
+        """首轮未命中后启用低延迟截图通道，返回是否由本次启用。
+
+        平台不支持或启用失败时返回 False，继续使用默认截图，不影响功能。
+        """
+        try:
+            return bool(self._driver.begin_fast_capture())
+        except Exception as e:
+            logger.debug("启用快速截图通道异常，回退默认截图: %s", e)
+            return False
+
+    def _end_fast_capture(self, started: bool) -> None:
+        """关闭本次启用的低延迟截图通道；未启用则不处理。"""
+        if not started:
+            return
+        try:
+            self._driver.end_fast_capture()
+        except Exception as e:
+            logger.debug("关闭快速截图通道异常（忽略）: %s", e)
+
+    # ============================================================
     # 图像识别
     # ============================================================
 
@@ -99,7 +123,9 @@ class VisionExtension:
                    region=None, threshold: float = 0.8,
                    timeout: Optional[float] = None,
                    mode: str = "template",
-                   min_match_count: int = 8) -> Optional[Rect]:
+                   min_match_count: int = 8,
+                   scale_range: Optional[Tuple[float, float]] = None
+                   ) -> Optional[Rect]:
         """查找图像位置。
 
         Args:
@@ -109,6 +135,7 @@ class VisionExtension:
             timeout: 超时秒，None 走全局 implicitly_wait
             mode: template 或 feature
             min_match_count: feature 模式下的最少有效特征点数
+            scale_range: 多尺度搜索缩放区间 (lo, hi)，None 用默认 3 档
 
         Returns:
             匹配位置 Rect，未找到返回 None
@@ -116,32 +143,43 @@ class VisionExtension:
         rect_region = self._resolve_region(region)
         deadline = time.monotonic() + self._get_timeout(timeout)
         interval = 0.1
-        while True:
-            source_img = self._driver.screenshot()
-            result = ImageMatcher.match(
-                template=template, source=source_img,
-                threshold=threshold, region=rect_region,
-                mode=mode, min_match_count=min_match_count,
-            )
-            if result is not None:
-                return result.rect
-            if time.monotonic() >= deadline:
-                return None
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            time.sleep(min(interval, remaining))
-            interval = min(interval * 2, 0.5)
+        fast_started = False
+        try:
+            while True:
+                source_img = self._driver.screenshot()
+                result = ImageMatcher.match(
+                    template=template, source=source_img,
+                    threshold=threshold, region=rect_region,
+                    mode=mode, min_match_count=min_match_count,
+                    scale_range=scale_range,
+                )
+                if result is not None:
+                    return result.rect
+                if time.monotonic() >= deadline:
+                    return None
+                # 首轮未命中且仍需轮询时才启用快通道：立即命中的场景不付
+                # 推流启动成本，需反复截图的等待场景享受低延迟帧。
+                if not fast_started:
+                    fast_started = self._try_begin_fast_capture()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                time.sleep(min(interval, remaining))
+                interval = min(interval * 2, 0.5)
+        finally:
+            self._end_fast_capture(fast_started)
 
     def touch_image(self, template: Union[str, 'Image', bytes],
                     region=None, threshold: float = 0.8,
                     timeout: Optional[float] = None,
                     mode: str = "template",
-                    min_match_count: int = 8) -> bool:
+                    min_match_count: int = 8,
+                    scale_range: Optional[Tuple[float, float]] = None) -> bool:
         """查找并点击图像。"""
         rect = self.find_image(
             template, region=region, threshold=threshold, timeout=timeout,
             mode=mode, min_match_count=min_match_count,
+            scale_range=scale_range,
         )
         if rect is None:
             return False
@@ -151,7 +189,8 @@ class VisionExtension:
     def exists_image(self, template: Union[str, 'Image', bytes],
                      region=None, threshold: float = 0.8,
                      mode: str = "template",
-                     min_match_count: int = 8) -> bool:
+                     min_match_count: int = 8,
+                     scale_range: Optional[Tuple[float, float]] = None) -> bool:
         """检查图像是否存在（单次检测，不等待）。"""
         rect_region = self._resolve_region(region)
         source_img = self._driver.screenshot()
@@ -159,6 +198,7 @@ class VisionExtension:
             template=template, source=source_img,
             threshold=threshold, region=rect_region,
             mode=mode, min_match_count=min_match_count,
+            scale_range=scale_range,
         )
         return result is not None
 
@@ -166,11 +206,13 @@ class VisionExtension:
                    region=None, threshold: float = 0.8,
                    timeout: float = 10,
                    mode: str = "template",
-                   min_match_count: int = 8) -> bool:
+                   min_match_count: int = 8,
+                   scale_range: Optional[Tuple[float, float]] = None) -> bool:
         """等待图像出现。"""
         rect = self.find_image(
             template, region=region, threshold=threshold, timeout=timeout,
             mode=mode, min_match_count=min_match_count,
+            scale_range=scale_range,
         )
         return rect is not None
 
@@ -190,22 +232,28 @@ class VisionExtension:
         deadline = time.monotonic() + self._get_timeout(timeout)
         attempts = 0
         interval = 0.1
-        while True:
-            if attempts > 0 and time.monotonic() >= deadline:
-                return []
-            attempts += 1
-            try:
-                source_img = self._driver.screenshot()
-                return OcrEngine.recognize(source_img, region=rect_region)
-            except DevhelmError:
-                raise
-            except Exception as e:
-                logger.warning("OCR 调用异常: %s", e)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+        fast_started = False
+        try:
+            while True:
+                if attempts > 0 and time.monotonic() >= deadline:
                     return []
-                time.sleep(min(interval, remaining))
-                interval = min(interval * 2, 0.5)
+                attempts += 1
+                try:
+                    source_img = self._driver.screenshot()
+                    return OcrEngine.recognize(source_img, region=rect_region)
+                except DevhelmError:
+                    raise
+                except Exception as e:
+                    logger.warning("OCR 调用异常: %s", e)
+                    if not fast_started:
+                        fast_started = self._try_begin_fast_capture()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return []
+                    time.sleep(min(interval, remaining))
+                    interval = min(interval * 2, 0.5)
+        finally:
+            self._end_fast_capture(fast_started)
 
     def find_text(self, text: str, region=None, fuzzy: bool = False,
                   index: int = 1,
@@ -226,20 +274,26 @@ class VisionExtension:
         deadline = time.monotonic() + self._get_timeout(timeout)
         attempts = 0
         interval = 0.1
-        while True:
-            if attempts > 0 and time.monotonic() >= deadline:
-                return None
-            attempts += 1
-            remaining = max(0.0, deadline - time.monotonic())
-            results = self.ocr(region=region, timeout=remaining)
-            matched = filter_by_text(results, text, fuzzy=fuzzy)
-            if matched and len(matched) > target_idx:
-                return matched[target_idx]
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            time.sleep(min(interval, remaining))
-            interval = min(interval * 2, 0.5)
+        fast_started = False
+        try:
+            while True:
+                if attempts > 0 and time.monotonic() >= deadline:
+                    return None
+                attempts += 1
+                remaining = max(0.0, deadline - time.monotonic())
+                results = self.ocr(region=region, timeout=remaining)
+                matched = filter_by_text(results, text, fuzzy=fuzzy)
+                if matched and len(matched) > target_idx:
+                    return matched[target_idx]
+                if not fast_started:
+                    fast_started = self._try_begin_fast_capture()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                time.sleep(min(interval, remaining))
+                interval = min(interval * 2, 0.5)
+        finally:
+            self._end_fast_capture(fast_started)
 
     def click_text(self, text: str, region=None, fuzzy: bool = False,
                    index: int = 1,

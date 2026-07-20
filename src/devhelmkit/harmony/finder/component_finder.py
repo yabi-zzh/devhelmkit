@@ -72,7 +72,7 @@ class ComponentFinder:
         self._rpc = rpc
         self._config = config
         self._popup_handler = PopupHandler(
-            self.find_component, rpc, config
+            self.find_components, rpc, config
         )
 
     # ============================================================
@@ -112,25 +112,46 @@ class ComponentFinder:
                 "Driver.waitForComponent", DRIVER_REF, [by_ref, timeout_ms]
             )
         except RpcError as e:
-            if self._should_dismiss_popup():
-                logger.debug("控件查找失败，尝试消除弹窗后重试: %s",
+            # RPC 异常路径：设备端查找过程报错时尝试消除弹窗后重试一次。
+            if not self._should_dismiss_popup():
+                raise
+            logger.debug("控件查找 RPC 异常，尝试消除弹窗后重试: %s",
+                         _format_selector(selector))
+            if not self._popup_handler.dismiss_popups():
+                raise ComponentNotFoundError(
+                    "控件未找到: %s" % _format_selector(selector)
+                ) from e
+            result = self._retry_find_after_dismiss(by_ref)
+        else:
+            # 未命中路径：waitForComponent 未找到时可能返回空而非抛错，此路径
+            # 同样尝试消除弹窗后重试一次，避免弹窗遮挡导致的稳定性失败。
+            if not result and self._should_dismiss_popup():
+                logger.debug("控件未命中，尝试消除弹窗后重试: %s",
                              _format_selector(selector))
                 if self._popup_handler.dismiss_popups():
-                    result = self._rpc.call(
-                        "Driver.waitForComponent", DRIVER_REF,
-                        [by_ref, timeout_ms]
-                    )
-                else:
-                    raise ComponentNotFoundError(
-                        "控件未找到: %s" % _format_selector(selector)
-                    ) from e
-            else:
-                raise
+                    result = self._retry_find_after_dismiss(by_ref)
         if not result:
             raise ComponentNotFoundError(
                 "控件未找到: %s" % _format_selector(selector)
             )
         return result
+
+    def _retry_find_after_dismiss(self, by_ref: str) -> Any:
+        """弹窗消除成功后，按配置等待并以重试超时重新查找一次。
+
+        wait_time_after_pop_window_dismiss 给弹窗关闭动画留时间，避免动画未完
+        就重试仍被遮挡；pop_window_retry_find_timeout 控制这次补偿查找的超时，
+        与首次查找超时解耦（重试通常无需再等满首次超时）。
+        """
+        wait_after = self._config.wait_time_after_pop_window_dismiss
+        if wait_after and wait_after > 0:
+            time.sleep(wait_after)
+        retry_timeout_ms = int(
+            self._config.pop_window_retry_find_timeout * 1000
+        )
+        return self._rpc.call(
+            "Driver.waitForComponent", DRIVER_REF, [by_ref, retry_timeout_ms]
+        )
 
     def find_components(self, selector: SelectorSpec) -> list:
         """查找所有匹配控件，返回 Component 引用列表。

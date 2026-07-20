@@ -98,7 +98,7 @@ class HarmonyDriver(BaseDriver):
         self._setup_device()
         self._rpc = RpcClient(self._device)
         self._finder = ComponentFinder(self._rpc, self._config)
-        self._implicit_wait: float = 10.0
+        self._implicit_wait: float = self._config.implicit_wait
         self._closed = False
         self._toast_observer: Optional[str] = None
         self._toast_listening: bool = False
@@ -759,6 +759,26 @@ class HarmonyDriver(BaseDriver):
         stream = self._screenshot_stream
         return stream is not None and stream._streaming
 
+    def begin_fast_capture(self) -> bool:
+        """启用推流作为低延迟连续截图通道（供图像/OCR 轮询查找加速）。
+
+        推流已激活（用户显式推流或录屏中）时返回 False，避免 end 阶段误关；
+        本次启动成功返回 True。启动失败按不支持处理，返回 False 回退默认截图。
+        推流激活后 screenshot() 会自动复用最新帧（约 0.03s/帧，HDC 约 0.44s）。
+        """
+        if self.is_screenshot_stream_active():
+            return False
+        try:
+            self._get_or_start_screenshot_stream()
+        except DevhelmError as e:
+            logger.debug("启用推流快通道失败，回退默认截图: %s", e)
+            return False
+        return True
+
+    def end_fast_capture(self) -> None:
+        """停止由 begin_fast_capture 启动的推流通道。"""
+        self._stop_screenshot_stream()
+
     def _capture_full_bytes(self) -> bytes:
         """全屏截图，返回 JPEG bytes。
 
@@ -789,13 +809,33 @@ class HarmonyDriver(BaseDriver):
         return buf.getvalue()
 
     def _capture_hdc_bytes(self) -> bytes:
-        """全屏截图，走 hdc shell snapshot_display + base64 读取。"""
+        """全屏截图，走 hdc shell snapshot_display + base64 读取。
+
+        失败按 config.screenshot_retry_times 重试，兜底截图服务偶发抖动
+        （空数据、base64 解码失败、shell 异常）。
+        """
         remote_path = "/data/local/tmp/devhelm_screenshot.jpeg"
         cmd = "rm -f %s && snapshot_display -f %s > /dev/null 2>&1 && base64 %s" % (
             remote_path, remote_path, remote_path
         )
-        b64_text = self.shell(cmd)
-        return base64.b64decode(b64_text.replace("\n", "").replace("\r", ""))
+        retries = max(1, self._config.screenshot_retry_times)
+        last_error: Optional[Exception] = None
+        for attempt in range(retries):
+            try:
+                b64_text = self.shell(cmd)
+                data = base64.b64decode(
+                    b64_text.replace("\n", "").replace("\r", "")
+                )
+                if data:
+                    return data
+                last_error = DevhelmError("截图返回空数据")
+            except Exception as e:
+                last_error = e
+                logger.debug("HDC 截图第 %d/%d 次失败: %s",
+                             attempt + 1, retries, e)
+        raise DevhelmError(
+            "HDC 截图失败（重试 %d 次）: %s" % (retries, last_error)
+        )
 
     def _get_or_start_screenshot_stream(self) -> 'ScreenshotStream':
         """获取或启动截图推流通道。"""

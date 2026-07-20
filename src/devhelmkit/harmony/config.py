@@ -2,40 +2,16 @@
 # -*- coding: utf-8 -*-
 """HarmonyDriverConfig：鸿蒙驱动配置。"""
 from dataclasses import dataclass, replace
-from typing import Optional, Tuple
+from typing import Optional
 
 from devhelmkit.exceptions import DevhelmError
-
-
-class ComponentFindMode:
-    """控件查找模式（类常量风格）。"""
-    UITEST = "uitest"
-    UITREE = "uitree"
 
 
 class ClearTextMode:
     """清空文本模式。"""
     ONCE = "once"
-    ONE_BY_ONE = "one_by_one"
-
-
-class InputTextModeConstant:
-    """输入文本模式（PASTE 模式需设备端 uitest 支持，API level > 20）。"""
-    DEFAULT = "default"
-    PASTE = "paste"
-
-
-class StepLogMode:
-    """步骤日志模式。"""
-    AUTO = "auto"
-    ENABLE = "enable"
-    DISABLE = "disable"
-
-
-class PopWindowHandlerConfig:
-    """弹窗消除开关（pop_window_dismiss 字段取值）。"""
-    ENABLE = "enable"
-    DISABLE = "disable"
+    # 聚焦后全选（Ctrl+A）再按删除键清空，兜底部分 clearText 不生效的输入框
+    SELECT_ALL = "select_all"
 
 
 class ScreenshotMode:
@@ -50,56 +26,34 @@ class ScreenshotMode:
 
 @dataclass
 class HarmonyDriverConfig:
-    """鸿蒙驱动配置，共 27 个配置项。
+    """鸿蒙驱动配置，共 13 个配置项。
 
-    控制鸿蒙驱动行为：控件查找策略、弹窗处理、操作等待、文本输入、
-    截图、日志、显示、调试、模板匹配、扩展能力、资源清理、hdc 路径。
+    控制鸿蒙驱动行为：控件查找、弹窗处理、文本输入、截图、
+    资源清理、hdc 路径。
     """
 
-    # 控件查找
-    component_find_backend: str = "uitest"
+    # 控件查找默认超时（秒），驱动隐式等待初值。非零以容忍异步渲染，
+    # 需即时判断时在具体调用传 timeout=0；运行时也可用 implicitly_wait() 覆盖。
+    implicit_wait: float = 10.0
 
     # 弹窗消除
     pop_window_dismiss: str = "disable"
-    enable_pop_window_dismiss_in_check: bool = True
+    # 弹窗消除后重试查找的超时（秒），仅在 pop_window_dismiss=enable 时生效
     pop_window_retry_find_timeout: int = 2
+    # 弹窗消除后、重试查找前的等待秒数，给页面留出关闭动画时间；0 表示不等待
     wait_time_after_pop_window_dismiss: int = 1
-    preprocess_pop_window: bool = False
+    # 单次查找失败时最多尝试消除的弹窗个数
     pop_window_handle_times: int = 4
-    pop_window_preprocess_times: int = 4
-    pop_window_service_restart_times: int = 3
-    enable_pop_window_screenshot: bool = True
-
-    # 操作等待
-    after_action_wait_time: int = 1
 
     # 文本输入
     clear_text_mode: str = ClearTextMode.ONCE
     clear_text_before_input: bool = True
-    input_text_mode: str = InputTextModeConstant.DEFAULT
-    _out_of_screen_coord_for_input_text: Tuple[int, int] = (10000, 10000)
 
     # 截图
-    enable_component_found_screenshot: bool = False
-    enable_action_screenshot: bool = False
+    # HDC 截图失败重试次数
     screenshot_retry_times: int = 3
     screenshot_mode: str = ScreenshotMode.HDC
     screenshot_stream_scale: float = 0.99
-
-    # 日志
-    save_step_log: str = StepLogMode.AUTO
-
-    # 显示
-    default_display_id: int = 0
-
-    # 调试
-    debug_page_info: bool = True
-
-    # 模板匹配
-    template_scale_range: Tuple[float, float] = (0.2, 1.2)
-
-    # 扩展
-    enable_extension: bool = True
 
     # 资源清理
     # close() 时是否停止设备端 uitest 守护进程，默认 False 复用进程
