@@ -117,8 +117,11 @@ class AgentManager:
         if self._abi is None or self._protocol_version is None:
             self.detect_device_info()
 
-        # 启动清理开关：先杀残留 daemon 再重启，规避复用到版本不匹配或状态损坏的进程
+        # 启动清理开关：先杀残留 daemon 再重启，规避复用到版本不匹配或状态损坏的进程。
+        # one-shot 语义：仅首次 setup 生效后立即置位，hdc 通道 BROKEN 重连会
+        # 反复调用本方法，若不置位则"setup 时重启"退化为"每次重连都杀 daemon"
         if self._restart_daemon_on_setup:
+            self._restart_daemon_on_setup = False
             logger.debug("restart_daemon_on_setup=True，清理残留守护进程 (serial=%s)",
                          self._device.serial)
             self.stop_daemon()
