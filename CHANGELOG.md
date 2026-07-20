@@ -5,6 +5,31 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0]
+
+### 修复
+
+- RPC 通道线程安全化，事件监听推送不再与调用返回值错位。
+- 修复 `drag_to_component()` 必然崩溃的问题。
+- 修复仅含正则条件的选择器（如 `textMatches`）误命中根节点的问题。
+- 修复多尺度图像匹配坐标偏移导致 `touch_image` 点击脱靶的问题。
+- 修复 webview 链路不可用：端口转发改为主机侧执行，且不再误杀主机上其他 chromedriver 进程。
+- 修复录屏并发竞态与长录屏内存膨胀；推流结束后不再出现一次必然的断连报错。
+- 修复 UIViewer 静止画面 CPU 空转、单设备阻塞拖垮全部 API、触控中断残留按压状态等并发问题。
+- hdc 子进程调用统一超时与异常契约；`swipe_to_back()` 高比例参数不再坐标错乱；重复 `connect()` 不再覆盖日志级别。
+
+### 变更
+
+- 选择器新增 `instance`（第 N 个匹配，0 起）；`index` 与 `text_matches_flags` 不再静默忽略，传入抛 `DevhelmError`（迁移：改用 `instance`，正则 flags 内联如 `(?i)`）。
+- `pull_file()` 返回实际保存的本地路径。
+- `HdcDevice.close()` 为终态操作，关闭后调用抛 `DeviceConnectError`。
+- chromedriver 默认动态分配端口，支持多实例并行（需固定端口时显式传 `chromedriver_port`）。
+- webview 内核版本探测失败直接报错，不再静默回退 114。
+
+### 移除
+
+- 删除零引用模块：`model` 下 9 个未接线模块、`utils/retry.py`、`utils/timeout.py`、`RemoteObjectManager`。
+
 ## [0.5.0]
 
 ### 新增
@@ -98,6 +123,7 @@
 - 采用 src layout 目录结构（包源码位于 `src/devhelmkit/`）。
 - `license` 声明改用 SPDX 表达式格式。
 
+[0.6.0]: https://github.com/yabi-zzh/devhelmkit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/yabi-zzh/devhelmkit/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/yabi-zzh/devhelmkit/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/yabi-zzh/devhelmkit/compare/v0.3.2...v0.4.0
