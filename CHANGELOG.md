@@ -87,7 +87,7 @@
 - 高级手势：鼠标、触控笔（带压力）、指关节、触控板、多指。
 - WebView 自动化（chromedriver + selenium）。
 - 图像匹配（OpenCV 模板 + 特征匹配）与 OCR（RapidOCR）。
-- 双查找后端：uitest（设备端 RPC）+ uitree（本地布局解析）。
+- 控件查找：uitest 设备端 RPC + 客户端 XPath / 控件树属性解析。
 - 屏幕录制：JPEG 帧捕获与 MP4 编码。
 - 网页版 UIViewer：本地双端口 Web 服务，实时投屏查看控件，支持画面刷新、设备导航键、触控与性能日志。
 - PEP 561 类型标记（`py.typed`），下游可识别类型注解。

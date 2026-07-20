@@ -489,7 +489,7 @@ d.touch_up(200, 200)
 
 所有图像识别方法通过 `d.vision` 命名空间访问。
 
-#### `d.vision.find_image(template, region=None, threshold=0.8, timeout=None, mode="template", min_match_count=8) -> Optional[Rect]`
+#### `d.vision.find_image(template, region=None, threshold=0.8, timeout=None, mode="template", min_match_count=8, scale_range=None) -> Optional[Rect]`
 
 查找图像位置，返回 `Rect` 或 `None`。
 
@@ -501,6 +501,7 @@ d.touch_up(200, 200)
 | timeout | float | None | 超时秒，`None` 走全局隐式等待 |
 | mode | str | "template" | `"template"` 模板匹配；`"feature"` 特征匹配 |
 | min_match_count | int | 8 | feature 模式下最少有效特征点数 |
+| scale_range | (float, float) | None | 多尺度搜索缩放区间，`None` 用默认 3 档 (0.9, 1.0, 1.1)；给定 (lo, hi) 在区间均匀采样 5 档 |
 
 **template 模式：** 单尺度快路径 → 多尺度兜底 → 颜色二次校验。
 
@@ -514,15 +515,15 @@ rect = d.vision.find_image("icon.png")
 rect = d.vision.find_image("icon.png", mode="feature", threshold=0.7)
 ```
 
-#### `d.vision.touch_image(template, region=None, threshold=0.8, timeout=None, mode="template", min_match_count=8) -> bool`
+#### `d.vision.touch_image(template, region=None, threshold=0.8, timeout=None, mode="template", min_match_count=8, scale_range=None) -> bool`
 
 查找并点击图像，成功返回 `True`。
 
-#### `d.vision.exists_image(template, region=None, threshold=0.8, mode="template", min_match_count=8) -> bool`
+#### `d.vision.exists_image(template, region=None, threshold=0.8, mode="template", min_match_count=8, scale_range=None) -> bool`
 
 检查图像是否存在（单次检测，不等待）。
 
-#### `d.vision.wait_image(template, region=None, threshold=0.8, timeout=10, mode="template", min_match_count=8) -> bool`
+#### `d.vision.wait_image(template, region=None, threshold=0.8, timeout=10, mode="template", min_match_count=8, scale_range=None) -> bool`
 
 等待图像出现，超时内找到返回 `True`。
 
@@ -697,7 +698,7 @@ items.last().click()
 
 #### `set_text(text, timeout=None) -> None`
 
-输入文本。
+输入文本。默认（`clear_text_before_input=True`）先清空再输入，即"替换"语义；设为 `False` 则在现有文本上追加。
 
 #### `get_text(timeout=None) -> str`
 
@@ -705,7 +706,7 @@ items.last().click()
 
 #### `clear_text(timeout=None) -> None`
 
-清空文本。
+清空文本。`clear_text_mode="once"` 走设备端 `clearText`；`"select_all"` 全选后按删除键清空，用于部分 `clearText` 不生效的输入框。
 
 #### `input_text(text, timeout=None) -> None`
 
@@ -905,7 +906,7 @@ d(id="title").after(className="Text")
 运行时更新配置字段，未知字段抛 `DehelmError`。
 
 ```python
-d.update_config(screenshot_mode="stream", after_action_wait_time=2)
+d.update_config(screenshot_mode="stream", implicit_wait=20)
 ```
 
 ### 应用安装与卸载
@@ -1347,7 +1348,7 @@ d.find_component(spec)
 from devhelmkit.harmony.config import HarmonyDriverConfig
 
 config = HarmonyDriverConfig(
-    component_find_backend="uitest",
+    implicit_wait=10.0,
     screenshot_mode="hdc",
     stop_daemon_on_close=False,
 )
@@ -1356,22 +1357,19 @@ d = devhelmkit.connect(config=config)
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| component_find_backend | str | `"uitest"` | `"uitest"`（RPC）或 `"uitree"`（本地解析） |
+| implicit_wait | float | 10.0 | 控件查找默认超时（秒），非零以容忍异步渲染；可 `connect(implicit_wait=...)` 设置或运行时 `implicitly_wait()` 覆盖 |
 | pop_window_dismiss | str | `"disable"` | 弹窗自动消除：`"enable"` / `"disable"` |
-| after_action_wait_time | int | 1 | 操作后等待时间（秒） |
-| clear_text_mode | str | `"once"` | `"once"` 或 `"one_by_one"` |
-| clear_text_before_input | bool | True | 输入前清空文本 |
-| input_text_mode | str | `"default"` | `"default"` 或 `"paste"`（需 API level > 20） |
+| pop_window_retry_find_timeout | int | 2 | 弹窗消除后重试查找超时（秒），仅 `pop_window_dismiss="enable"` 生效 |
+| wait_time_after_pop_window_dismiss | int | 1 | 弹窗消除后、重试查找前的等待秒数 |
+| pop_window_handle_times | int | 4 | 单次查找失败时最多尝试消除的弹窗个数 |
+| clear_text_mode | str | `"once"` | `"once"`（`clearText`）或 `"select_all"`（全选+删，兜底 clearText 不生效） |
+| clear_text_before_input | bool | True | `set_text` 前是否先清空（默认替换语义）|
 | screenshot_mode | str | `"hdc"` | `"hdc"`（默认）或 `"stream"`（低延迟） |
 | screenshot_stream_scale | float | 0.99 | 流截图缩放比例 |
-| screenshot_retry_times | int | 3 | 截图重试次数 |
+| screenshot_retry_times | int | 3 | HDC 截图失败重试次数 |
 | stop_daemon_on_close | bool | False | `close()` 时是否停止 uitest 守护进程 |
 | restart_daemon_on_setup | bool | False | setup 时是否先清理残留 uitest 守护进程再重启（绕过复用优先） |
 | hdc_path | str | `"hdc"` | hdc 可执行文件路径 |
-| default_display_id | int | 0 | 默认 Display ID |
-| debug_page_info | bool | True | 调试页面信息 |
-| template_scale_range | Tuple | (0.2, 1.2) | 模板匹配缩放范围 |
-| enable_extension | bool | True | 启用扩展能力 |
 
 ---
 
