@@ -223,7 +223,9 @@ API 级别。
 
 U2 风格选择器，返回控件对象。
 
-支持条件：`text` / `text_contains` / `text_starts_with` / `text_ends_with` / `text_matches` / `id` / `resourceId` / `className` / `description` / `desc` / `key` / `type` / `index` / `instance`。
+支持条件：`text` / `text_contains` / `text_starts_with` / `text_ends_with` / `text_matches` / `id` / `resourceId` / `className` / `description` / `desc` / `key` / `type` / `instance`（第 N 个匹配，0 起）。
+
+> `index` 与 `text_matches_flags` 在 HarmonyOS 平台不受支持，传入会抛 `DevhelmError`；请分别改用 `instance` 和正则内联 flags（如 `(?i)`）。
 
 ```python
 d(text="登录").click()
@@ -451,9 +453,9 @@ d.touch_up(200, 200)
 
 推送文件到设备。
 
-#### `pull_file(remote_path, local_path=None, timeout=60) -> None`
+#### `pull_file(remote_path, local_path=None, timeout=60) -> str`
 
-从设备拉取文件。
+从设备拉取文件，返回实际保存的本地路径。`local_path` 为 `None` 时保存到临时文件，路径通过返回值获取。
 
 #### `has_file(path: str) -> bool`
 
@@ -827,7 +829,7 @@ d(id="status").wait_until(
 
 #### `drag_to_component(other: BaseComponent, timeout=None) -> None`
 
-拖拽到另一控件。
+拖拽到另一控件。内部先将目标控件解析为设备端引用再调用 `Component.dragTo`。
 
 ---
 
@@ -1338,7 +1340,7 @@ d.find_component(spec)
 
 纯数据类，封装控件定位条件。通常通过 `d(text="...", id="...")` 隐式构造。
 
-支持字段：`text`、`text_contains`、`text_starts_with`、`text_ends_with`、`text_matches`、`desc`、`desc_contains`、`desc_starts_with`、`desc_ends_with`、`desc_matches`、`resource_id` / `id`、`class_name` / `className`、`key`、`type`、`index`、`instance`、`xpath`。
+支持字段：`text`、`text_contains`、`text_starts_with`、`text_ends_with`、`text_matches`、`desc`、`desc_contains`、`desc_starts_with`、`desc_ends_with`、`desc_matches`、`resource_id` / `id`、`class_name` / `className`、`key`、`type`、`instance`、`xpath`。`index` 与 `text_matches_flags` 不受支持，传入抛 `DevhelmError`。
 
 ---
 
