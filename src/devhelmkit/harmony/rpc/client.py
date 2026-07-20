@@ -22,7 +22,6 @@ from devhelmkit.exceptions import (
     RpcError,
 )
 from devhelmkit.harmony.rpc.proxy_v2 import rpc as rpc_send
-from devhelmkit.harmony.rpc.remote_object import RemoteObjectManager
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +30,15 @@ if TYPE_CHECKING:
 
 
 class RpcClient:
-    """RPC 客户端，统一使用 bin 模式。"""
+    """RPC 客户端，统一使用 bin 模式。
+
+    设备端远程对象（By/Component 引用）的回收依赖 uitest 守护进程
+    生命周期：连接关闭或 daemon 重启时由设备端统一释放，客户端不做
+    逐对象回收。
+    """
 
     def __init__(self, device: 'HdcDevice'):
         self._device = device
-        self._remote_objects = RemoteObjectManager()
 
     def call(self, api_name: str, this_ref: str, args: list) -> Any:
         """调用设备端 API。
@@ -43,7 +46,8 @@ class RpcClient:
         Args:
             api_name: API 名称（api9+ 风格，如 "Driver.click"、"On.text"）
             this_ref: 对象引用（如 'Driver#0'、'Component#3'）
-            args: 参数列表（递归处理 FrontEndClass → ref, JsonBase → dict, Enum → value）
+            args: 参数列表。仅支持 JSON 可序列化值与远程对象引用字符串
+                （如 "Component#3"），调用方负责先把对象解析为引用
 
         Returns:
             设备端返回结果
@@ -121,8 +125,3 @@ class RpcClient:
     def device(self) -> 'HdcDevice':
         """底层设备通道，供 Captures/Gestures 等非 callHypiumApi 模块复用。"""
         return self._device
-
-    @property
-    def remote_objects(self) -> RemoteObjectManager:
-        """远程对象管理器。"""
-        return self._remote_objects

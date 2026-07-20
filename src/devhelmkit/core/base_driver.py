@@ -387,8 +387,11 @@ class BaseDriver(ABC):
     @abstractmethod
     def pull_file(self, remote_path: str,
                   local_path: Optional[str] = None,
-                  timeout: int = 60) -> None:
-        """从设备拉取文件。"""
+                  timeout: int = 60) -> str:
+        """从设备拉取文件，返回实际保存的本地路径。
+
+        local_path 为 None 时保存到临时文件，调用方通过返回值获取路径。
+        """
 
     @abstractmethod
     def has_file(self, path: str) -> bool:

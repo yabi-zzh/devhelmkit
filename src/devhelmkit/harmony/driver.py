@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from devhelmkit.core.base_component import BaseComponent
-    from devhelmkit.harmony.vision.vision_extension import VisionExtension
+    from devhelmkit.core.vision.vision_extension import VisionExtension
 
 # 语义按键 → KeyCode 映射
 _KEY_MAP = {
@@ -116,7 +116,7 @@ class HarmonyDriver(BaseDriver):
     # ============================================================
 
     def close(self, stop_daemon: Optional[bool] = None) -> None:
-        """关闭驱动，释放 RPC 对象、socket 与端口转发。
+        """关闭驱动，释放 socket 与端口转发。
 
         Args:
             stop_daemon: 是否停止设备端 uitest 守护进程。
@@ -130,10 +130,6 @@ class HarmonyDriver(BaseDriver):
             self._stop_screenshot_stream()
         except Exception as e:
             logger.debug("关闭截图推流异常（忽略）: %s", e)
-        try:
-            self._rpc.remote_objects.release_all()
-        except Exception as e:
-            logger.debug("释放远程对象异常（忽略）: %s", e)
         if stop_daemon is None:
             stop_daemon = self._config.stop_daemon_on_close
         self._device.close(stop_daemon=stop_daemon)
@@ -799,14 +795,13 @@ class HarmonyDriver(BaseDriver):
         """从推流通道获取最新帧 bytes。
 
         首次调用时自动启动推流，后续复用已建立的通道。
+        直接取缓存的原始 JPEG bytes，避免 PIL 解码+重编码的二次有损。
         """
         stream = self._get_or_start_screenshot_stream()
-        img = stream.get_frame()
-        if img is None:
+        data = stream.get_frame_bytes()
+        if data is None:
             raise DevhelmError("推流截图未获取到帧数据")
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG')
-        return buf.getvalue()
+        return data
 
     def _capture_hdc_bytes(self) -> bytes:
         """全屏截图，走 hdc shell snapshot_display + base64 读取。
@@ -838,18 +833,25 @@ class HarmonyDriver(BaseDriver):
         )
 
     def _get_or_start_screenshot_stream(self) -> 'ScreenshotStream':
-        """获取或启动截图推流通道。"""
+        """获取或启动截图推流通道。
+
+        旧实例已停止推流时先显式 stop() 释放其端口转发等资源再替换；
+        启动失败不残留半初始化实例，避免后续状态判断错乱。
+        """
         if self._screenshot_stream is not None and \
                 self._screenshot_stream._streaming:
             return self._screenshot_stream
 
-        self._screenshot_stream = ScreenshotStream(
+        self._stop_screenshot_stream()
+        stream = ScreenshotStream(
             self._device,
             scale=self._config.screenshot_stream_scale
         )
-        if not self._screenshot_stream.start():
+        if not stream.start():
+            stream.stop()
             raise DevhelmError("截图推流通道启动失败")
-        return self._screenshot_stream
+        self._screenshot_stream = stream
+        return stream
 
     def _stop_screenshot_stream(self) -> None:
         """停止截图推流通道。"""
@@ -1089,12 +1091,13 @@ class HarmonyDriver(BaseDriver):
 
     def pull_file(self, remote_path: str,
                   local_path: Optional[str] = None,
-                  timeout: int = 60) -> None:
+                  timeout: int = 60) -> str:
         if local_path is None:
             tmp = tempfile.NamedTemporaryFile(delete=False)
             local_path = tmp.name
             tmp.close()
         self._device.pull(remote_path, local_path, timeout=timeout)
+        return local_path
 
     def has_file(self, path: str) -> bool:
         output = self.shell("test -f %s && echo yes || echo no" % shlex.quote(path))
@@ -1571,12 +1574,15 @@ class HarmonyDriver(BaseDriver):
         logger.debug("侧滑返回 side=%s times=%d (serial=%s)",
                      side, times, self.device_sn)
         side = side.upper()
+        # 终点高度封顶 0.99：height > 0.83 时 height*1.2 会超出比例区间 [0,1]，
+        # 被 to_abs_pos 误判为绝对像素坐标，导致终点跳到屏幕顶部
+        end_height = min(height * 1.2, 0.99)
         if side == "RIGHT":
             start = self.to_abs_pos(0.99, height)
-            end = self.to_abs_pos(0.6, height * 1.2)
+            end = self.to_abs_pos(0.6, end_height)
         elif side == "LEFT":
             start = self.to_abs_pos(0.01, height)
-            end = self.to_abs_pos(0.4, height * 1.2)
+            end = self.to_abs_pos(0.4, end_height)
         else:
             raise DevhelmError("未知侧滑方向: %s" % side)
         cmd = "uinput -T -m %d %d %d %d %d" % (

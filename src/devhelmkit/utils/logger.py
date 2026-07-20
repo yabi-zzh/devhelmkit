@@ -19,6 +19,7 @@
 """
 import logging
 import sys
+from typing import Optional
 
 _LOGGER_NAME = "devhelmkit"
 
@@ -51,18 +52,31 @@ class _MillisFormatter(logging.Formatter):
         return "%s.%03d" % (timestamp, record.msecs)
 
     def format(self, record):
-        record.levelname = self._LEVEL_SHORT.get(record.levelno, record.levelname)
-        return super().format(record)
+        # record 会被传给同一 logger 的其他 handler（如用户自有 handler），
+        # 不能就地改写 levelname，缩写只作用于本 handler 的输出
+        original = record.levelname
+        record.levelname = self._LEVEL_SHORT.get(record.levelno, original)
+        try:
+            return super().format(record)
+        finally:
+            record.levelname = original
 
 
-def setup_logger(level: int = logging.INFO) -> logging.Logger:
+def setup_logger(level: Optional[int] = logging.INFO) -> logging.Logger:
     """配置 devhelmkit 根 logger，附加控制台 handler。
 
     所有以 _LOGGER_NAME 为前缀的子 logger（如 devhelmkit.harmony.driver）
     均继承此 handler 与级别配置。
+
+    Args:
+        level: 日志级别；None 表示不改动已有级别（仅在未配置过时置 INFO），
+            避免重复 connect 覆盖用户先前显式设置的级别。
     """
     root = logging.getLogger(_LOGGER_NAME)
-    root.setLevel(level)
+    if level is not None:
+        root.setLevel(level)
+    elif root.level == logging.NOTSET:
+        root.setLevel(logging.INFO)
     if not any(isinstance(h, logging.StreamHandler) and h.stream is sys.stderr
                for h in root.handlers):
         handler = logging.StreamHandler(sys.stderr)
