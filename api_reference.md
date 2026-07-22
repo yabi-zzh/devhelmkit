@@ -318,6 +318,23 @@ d.swipe(0.5, 0.8, 0.5, 0.2)   # 屏幕中央上滑
 | area | 滑动区域 |
 | speed | 滑动速度 |
 
+#### `swipe_ext(direction, scale=0.8, box=None, duration=0.5) -> None`
+
+按比例在全屏或指定矩形内方向滑动（相对 `swipe_dir` 的像素距离更易跨分辨率复用）。
+
+```python
+d.swipe_ext("up")
+d.swipe_ext("up", scale=0.6)
+d.swipe_ext("up", box=(0.2, 0.2, 0.8, 0.8))  # 仅在局部区域上滑
+```
+
+| 参数 | 说明 |
+|------|------|
+| direction | `up` / `down` / `left` / `right`（`bottom` 视为 `down`） |
+| scale | 行程占区域边长比例，范围 `(0, 1]` |
+| box | 可选 `(x1, y1, x2, y2)`，支持比例或像素；默认全屏 |
+| duration | 滑动时长（秒） |
+
 #### `drag(x1, y1, x2, y2, duration=0.5) -> None`
 
 拖拽；坐标规则同 `swipe`。

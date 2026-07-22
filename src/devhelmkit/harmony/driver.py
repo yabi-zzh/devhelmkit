@@ -577,6 +577,63 @@ class HarmonyDriver(BaseDriver):
             raise DevhelmError("未知滑动方向: %s" % direction)
         self.swipe(x1, y1, x2, y2)
 
+    def swipe_ext(self, direction: str, scale: float = 0.8,
+                  box=None, duration: float = 0.5) -> None:
+        """按比例在全屏或 box 区域内方向滑动。
+
+        例：``d.swipe_ext("up")``、``d.swipe_ext("up", box=(0.2, 0.2, 0.8, 0.8))``
+        """
+        if not isinstance(scale, (int, float)) or scale <= 0 or scale > 1.0:
+            raise DevhelmError("scale 须在 (0, 1] 内，收到: %r" % (scale,))
+        direction = direction.upper()
+        if direction == "BOTTOM":
+            direction = "DOWN"
+        if direction not in ("UP", "DOWN", "LEFT", "RIGHT"):
+            raise DevhelmError(
+                "swipe_ext direction 仅支持 up/down/left/right，收到: %s"
+                % direction
+            )
+
+        if box is None:
+            x1, y1 = 0, 0
+            x2, y2 = self.get_display_size()
+        else:
+            x1, y1, x2, y2 = self._normalize_swipe_box(box)
+
+        width, height = x2 - x1, y2 - y1
+        if width < 2 or height < 2:
+            raise DevhelmError("swipe_ext 区域无效: (%s, %s, %s, %s)"
+                              % (x1, y1, x2, y2))
+        # round 避免 (1-scale) 浮点误差导致偏移差 1px
+        h_offset = int(round(width * (1 - scale) / 2))
+        v_offset = int(round(height * (1 - scale) / 2))
+
+        if direction == "LEFT":
+            start = (x2 - h_offset, y1 + height // 2)
+            end = (x1 + h_offset, y1 + height // 2)
+        elif direction == "RIGHT":
+            start = (x1 + h_offset, y1 + height // 2)
+            end = (x2 - h_offset, y1 + height // 2)
+        elif direction == "UP":
+            start = (x1 + width // 2, y2 - v_offset)
+            end = (x1 + width // 2, y1 + v_offset)
+        else:  # DOWN
+            start = (x1 + width // 2, y1 + v_offset)
+            end = (x1 + width // 2, y2 - v_offset)
+        self.swipe(start[0], start[1], end[0], end[1], duration=duration)
+
+    def _normalize_swipe_box(self, box) -> Tuple[int, int, int, int]:
+        """校验并转换 swipe_ext 的 box 为绝对像素 (x1, y1, x2, y2)。"""
+        if not isinstance(box, (tuple, list)) or len(box) != 4:
+            raise DevhelmError("box 须为长度为 4 的元组 (x1, y1, x2, y2)")
+        x1, y1 = self.to_abs_pos(box[0], box[1])
+        x2, y2 = self.to_abs_pos(box[2], box[3])
+        if not (x1 < x2 and y1 < y2):
+            raise DevhelmError(
+                "box 须满足 x1 < x2 且 y1 < y2，收到: %r" % (box,)
+            )
+        return x1, y1, x2, y2
+
     def drag(self, x1: Union[int, float], y1: Union[int, float],
              x2: Union[int, float], y2: Union[int, float],
              duration: float = 0.5) -> None:

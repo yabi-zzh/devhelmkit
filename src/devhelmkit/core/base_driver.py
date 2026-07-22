@@ -205,6 +205,18 @@ class BaseDriver(ABC):
         """方向滑动：'UP' / 'DOWN' / 'LEFT' / 'RIGHT'。"""
 
     @abstractmethod
+    def swipe_ext(self, direction: str, scale: float = 0.8,
+                  box=None, duration: float = 0.5) -> None:
+        """按比例在全屏或 ``box`` 区域内方向滑动。
+
+        Args:
+            direction: ``up``/``down``/``left``/``right``（``bottom`` 视为 ``down``）。
+            scale: 滑动行程占区域边长的比例，范围 ``(0, 1]``。
+            box: 可选 ``(x1, y1, x2, y2)``，支持比例或像素。
+            duration: 滑动时长（秒）。
+        """
+
+    @abstractmethod
     def drag(self, x1: Union[int, float], y1: Union[int, float],
              x2: Union[int, float], y2: Union[int, float],
              duration: float = 0.5) -> None:
