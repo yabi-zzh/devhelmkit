@@ -293,6 +293,53 @@ class ComponentFinder:
         """
         return self._rpc.call("Component." + method, component_ref, args or [])
 
+    def scroll_search(self, container_ref: str, target: SelectorSpec,
+                      vertical: bool = True,
+                      offset: Optional[int] = None) -> Optional[str]:
+        """在可滚动容器内调用设备端 Component.scrollSearch。
+
+        Args:
+            container_ref: 可滚动容器的 Component 引用。
+            target: 目标控件选择器（须可转为设备端 On/By 链）。
+            vertical: 是否垂直滚动；False 为水平（设备 api >= 18）。
+            offset: 滚动边界偏移。设备协议为比例 0-100；传入时须同时带
+                vertical（与 Hypium / uitest 约束一致）。
+
+        Returns:
+            命中控件的 Component 引用；未找到返回 None。
+        """
+        search_selector = self._to_scroll_search_selector(target)
+        by_ref = self._build_by_ref(search_selector)
+        args: list = [by_ref]
+        if offset is not None:
+            args.extend([bool(vertical), int(offset)])
+        elif not vertical:
+            args.append(False)
+        result = self.call_component_by_ref(
+            container_ref, "scrollSearch", args
+        )
+        return result if result else None
+
+    @staticmethod
+    def _to_scroll_search_selector(selector: SelectorSpec) -> SelectorSpec:
+        """将目标选择器规范为设备端 scrollSearch 可用的 On/By 条件。
+
+        复杂 xpath / instance 无法下推到 scrollSearch，显式拒绝以免误匹配。
+        """
+        if selector.instance is not None:
+            raise DevhelmError(
+                "scroll_search 不支持 instance，设备端 scrollSearch 仅返回首个匹配"
+            )
+        if selector.xpath is None:
+            return selector
+        direct = _simple_type_xpath_selector(selector.xpath)
+        if direct is None:
+            raise DevhelmError(
+                "scroll_search 目标不支持复杂 xpath，"
+                "请改用 text/id/type/desc 等设备端选择器"
+            )
+        return direct
+
     def find_component_ref(self, selector: SelectorSpec,
                            timeout: float = DEFAULT_FIND_TIMEOUT) -> str:
         """查找控件并返回 Component 引用，语义等同于 find_component。"""

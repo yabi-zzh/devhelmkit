@@ -429,10 +429,21 @@ class UiObject(BaseComponent):
     # 滚动类
     # ============================================================
 
-    def scroll_search(self, target, vertical: bool = True,
-                      offset: Optional[int] = None) -> Optional['UiObject']:
+    def scroll_search(self, target=None, vertical: bool = True,
+                      offset: Optional[int] = None,
+                      direction: Optional[str] = None,
+                      max_swipes: int = 20,
+                      speed: int = 600,
+                      native: bool = False,
+                      **kwargs) -> Optional['UiObject']:
+        """在当前可滚动容器内滚动查找目标控件。
+
+        例：``d(type="List").scroll_search(text="隐私和安全", direction="up")``
+        """
         return self._driver.scroll_search(
-            self._selector, target, vertical, offset
+            self._selector, target, vertical=vertical, offset=offset,
+            direction=direction, max_swipes=max_swipes, speed=speed,
+            native=native, **kwargs
         )
 
     def scroll_to_top(self, speed: int = 600,

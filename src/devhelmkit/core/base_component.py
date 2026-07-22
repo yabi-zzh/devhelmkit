@@ -299,9 +299,23 @@ class BaseComponent(ABC):
     # ============================================================
 
     @abstractmethod
-    def scroll_search(self, target, vertical: bool = True,
-                      offset: Optional[int] = None) -> Optional['BaseComponent']:
-        """滚动查找子控件。"""
+    def scroll_search(self, target=None, vertical: bool = True,
+                      offset: Optional[int] = None,
+                      direction: Optional[str] = None,
+                      max_swipes: int = 20,
+                      speed: int = 600,
+                      native: bool = False,
+                      **kwargs) -> Optional['BaseComponent']:
+        """滚动查找子控件。
+
+        target 可为 str / dict / SelectorSpec / UiObject；也可直接传
+        选择器关键字参数，如 ``scroll_search(text="系统")``。
+
+        direction: ``up``/``down``/``left``/``right``（手指滑动方向）；
+            默认 ``up``（上滑露出下方内容）。native=True 时忽略。
+        native: True 走设备端 Component.scrollSearch（无方向，找不到可能
+            来回扫较久）；默认 False 走客户端定向滑动查找。
+        """
 
     @abstractmethod
     def scroll_to_top(self, speed: int = 600,

@@ -467,7 +467,13 @@ d.touch_up(200, 200)
 
 #### `find_component(target, scroll_target=None) -> Optional[BaseComponent]`
 
-查找单个控件，未找到返回 `None`。
+查找单个控件。未传 `scroll_target` 时返回惰性 `UiObject`（对齐 U2，操作时再定位）；传入 `scroll_target` 时在对应可滚动容器内执行 `scroll_search`，未找到返回 `None`。
+
+```python
+d.find_component({"text": "拒绝"}, scroll_target={"type": "Scroll"})
+# 等价于：
+d(type="Scroll").scroll_search(text="拒绝")
+```
 
 #### `find_all_components(target) -> List[BaseComponent]`
 
@@ -847,11 +853,27 @@ d(id="status").wait_until(
 
 ### 滚动
 
-#### `scroll_search(target, vertical=True, offset=None) -> Optional[BaseComponent]`
+#### `scroll_search(target, vertical=True, offset=None, direction=None, max_swipes=20, speed=600, native=False) -> Optional[BaseComponent]`
 
-滚动查找子控件，返回控件或 `None`。
+在当前可滚动容器内滚动查找子控件。默认走**客户端定向滑动查找**；命中返回已绑定引用的控件，未命中返回 `None`。
 
-> HarmonyOS 平台暂未实现，调用会抛 `NotImplementedError`。可用 `scroll_to_top` / `scroll_to_bottom` 配合 `find_component` 替代。
+```python
+# 上滑查找下方项（默认 direction="up"）
+item = d(type="List").scroll_search(text="隐私和安全", direction="up")
+# 下滑查找上方项
+item = d(type="List").scroll_search(text="WLAN", direction="down", max_swipes=15)
+# 设备端原生（无方向，目标不存在时可能来回扫较久）
+item = d(type="List").scroll_search(text="系统", native=True)
+```
+
+| 参数 | 说明 |
+|------|------|
+| `direction` | `up`/`down`/`left`/`right`，表示**手指滑动方向**；默认 `up`（上滑露出下方内容）。`native=True` 时忽略 |
+| `max_swipes` | 客户端滑动最大次数，防止空扫 |
+| `native` | `True` 走设备端 `Component.scrollSearch`（仅 `vertical`/`offset`，**不能指定方向**） |
+| `vertical`/`offset` | 仅 `native=True` 时生效；`offset` 为设备协议滚动偏移比例（0–100） |
+
+`target` 支持 `str` / `dict` / `SelectorSpec` / `UiObject`，也可直接传选择器关键字参数。复杂 xpath、`instance` 在 `native=True` 时无法下推，会抛 `DevhelmError`。
 
 #### `scroll_to_top(speed=600, timeout=None) -> None`
 

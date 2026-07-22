@@ -25,7 +25,12 @@ from PIL import Image
 
 from devhelmkit.core.base_driver import BaseDriver
 from devhelmkit.core.selector_spec import SelectorSpec, build_selector
-from devhelmkit.exceptions import DeviceConnectError, DevhelmError, DevhelmTimeoutError
+from devhelmkit.exceptions import (
+    ComponentNotFoundError,
+    DeviceConnectError,
+    DevhelmError,
+    DevhelmTimeoutError,
+)
 from devhelmkit.harmony.config import HarmonyDriverConfig, ScreenshotMode
 from devhelmkit.harmony.device.hdc import HdcDevice
 from devhelmkit.harmony.finder.component_finder import ComponentFinder, DRIVER_REF
@@ -1142,19 +1147,143 @@ class HarmonyDriver(BaseDriver):
             return True
         return self._finder.wait_component_gone(selector, timeout)
 
-    def scroll_search(self, selector: SelectorSpec, target,
+    def scroll_search(self, selector: SelectorSpec, target=None,
                       vertical: bool = True,
-                      offset: Optional[int] = None) -> Optional['UiObject']:
+                      offset: Optional[int] = None,
+                      direction: Optional[str] = None,
+                      max_swipes: int = 20,
+                      speed: int = 600,
+                      native: bool = False,
+                      **kwargs) -> Optional['UiObject']:
         """在可滚动容器内滚动查找目标控件。
 
-        当前 HarmonyOS 实现未接入设备端滚动查找能力，调用即抛
-        NotImplementedError。需要滚动定位时，可用 scroll_to_top /
-        scroll_to_bottom 配合 find_component 手动实现。
+        默认走客户端定向滑动查找（可指定 direction，受 max_swipes 约束）。
+        ``native=True`` 时改走设备端 ``Component.scrollSearch``（仅
+        vertical/offset，无方向；目标不存在时可能上下来回扫较久）。
+
+        查找前先检查目标是否已可见；命中返回已绑定引用的控件，未命中
+        返回 None；容器不存在抛 ComponentNotFoundError。
         """
-        raise NotImplementedError(
-            "scroll_search 在 HarmonyOS 平台暂未实现，"
-            "请用 scroll_to_top/scroll_to_bottom 配合 find_component 替代"
+        if kwargs:
+            if target is not None:
+                raise DevhelmError(
+                    "scroll_search 不能同时传 target 与选择器关键字参数"
+                )
+            target = kwargs
+        target_selector = _to_selector(target)
+        if target_selector is None:
+            raise DevhelmError("无效的滚动查找目标: %r" % (target,))
+
+        # 已在屏上则不必滚动
+        found = self._find_scroll_target_now(target_selector)
+        if found is not None:
+            return found
+
+        if native:
+            container = UiObject(self, selector)
+            container_ref = container._resolve_component_ref()
+            result_ref = self._finder.scroll_search(
+                container_ref, target_selector,
+                vertical=vertical, offset=offset
+            )
+            if not result_ref:
+                return None
+            hit = UiObject(self, target_selector)
+            hit._component_ref = result_ref
+            return hit
+
+        swipe_direction = (direction or "up").upper()
+        return self._scroll_search_by_swipe(
+            selector, target_selector, swipe_direction,
+            max_swipes=max_swipes, speed=speed
         )
+
+    def _find_scroll_target_now(
+            self, target_selector: SelectorSpec) -> Optional['UiObject']:
+        """即时查找目标；不存在返回 None（不抛错）。"""
+        refs = self._finder.find_components(target_selector)
+        if not refs:
+            return None
+        hit = UiObject(self, target_selector)
+        hit._component_ref = refs[0]
+        return hit
+
+    def _poll_scroll_target(
+            self, target_selector: SelectorSpec,
+            timeout: float = 0.6) -> Optional['UiObject']:
+        """滑动后短轮询，目标一出现立刻返回，避免再多滑一次。"""
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while True:
+            found = self._find_scroll_target_now(target_selector)
+            if found is not None:
+                return found
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.08)
+
+    def _scroll_search_by_swipe(
+            self, container_selector: SelectorSpec,
+            target_selector: SelectorSpec, direction: str,
+            max_swipes: int = 20, speed: int = 600) -> Optional['UiObject']:
+        """在容器 bounds 内按指定方向滑动查找（对齐 Hypium UiTree 策略）。"""
+        direction = direction.upper()
+        if direction not in ("UP", "DOWN", "LEFT", "RIGHT"):
+            raise DevhelmError(
+                "scroll_search direction 仅支持 up/down/left/right，收到: %s"
+                % direction
+            )
+        max_swipes = max(0, int(max_swipes))
+        container = UiObject(self, container_selector)
+        # 确保容器存在
+        container._resolve_component_ref()
+
+        found = self._find_scroll_target_now(target_selector)
+        if found is not None:
+            return found
+
+        for _ in range(max_swipes):
+            bounds = container.bounds
+            # 步长略收，降低一次滑过目标后再多滑的概率
+            self._swipe_in_bounds(
+                bounds, direction, speed=speed, extent=0.55
+            )
+            found = self._poll_scroll_target(target_selector, timeout=0.7)
+            if found is not None:
+                return found
+            container.refresh()
+
+        return self._find_scroll_target_now(target_selector)
+
+    def _swipe_in_bounds(self, bounds: Rect, direction: str,
+                         speed: int = 600, extent: float = 0.72) -> None:
+        """在矩形区域内按方向滑动（direction 为手指滑动方向）。"""
+        width = bounds.right - bounds.left
+        height = bounds.bottom - bounds.top
+        if width < 2 or height < 2:
+            raise DevhelmError("滚动容器 bounds 无效: %s" % bounds)
+        cx = (bounds.left + bounds.right) // 2
+        cy = (bounds.top + bounds.bottom) // 2
+        margin_x = max(2, int(width * (1 - extent) / 2))
+        margin_y = max(2, int(height * (1 - extent) / 2))
+        direction = direction.upper()
+        if direction == "UP":
+            x1, y1 = cx, bounds.bottom - margin_y
+            x2, y2 = cx, bounds.top + margin_y
+        elif direction == "DOWN":
+            x1, y1 = cx, bounds.top + margin_y
+            x2, y2 = cx, bounds.bottom - margin_y
+        elif direction == "LEFT":
+            x1, y1 = bounds.right - margin_x, cy
+            x2, y2 = bounds.left + margin_x, cy
+        elif direction == "RIGHT":
+            x1, y1 = bounds.left + margin_x, cy
+            x2, y2 = bounds.right - margin_x, cy
+        else:
+            raise DevhelmError("未知滑动方向: %s" % direction)
+        # swipe 的 duration 由距离/speed 反推，保证速度接近调用方预期
+        distance = max(abs(x2 - x1), abs(y2 - y1), 1)
+        duration = distance / float(speed) if speed > 0 else 0.4
+        self.swipe(x1, y1, x2, y2, duration=duration)
 
     # ============================================================
     # 控件查找（BaseDriver 契约）
@@ -1165,7 +1294,16 @@ class HarmonyDriver(BaseDriver):
         selector = _to_selector(target)
         if selector is None:
             return None
-        return UiObject(self, selector)
+        if scroll_target is None:
+            return UiObject(self, selector)
+        # 对齐 Hypium：在 scroll_target 容器内滚动查找 target。
+        scroll_selector = _to_selector(scroll_target)
+        if scroll_selector is None:
+            return None
+        try:
+            return self.scroll_search(scroll_selector, selector)
+        except ComponentNotFoundError:
+            return None
 
     def find_all_components(self, target) -> List['BaseComponent']:
         selector = _to_selector(target)
