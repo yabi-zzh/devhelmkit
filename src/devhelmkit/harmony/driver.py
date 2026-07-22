@@ -111,6 +111,7 @@ class HarmonyDriver(BaseDriver):
         self._ui_event_listening: bool = False
         self._vision: Optional['VisionExtension'] = None
         self._screenshot_stream: Optional['ScreenshotStream'] = None
+        self._perf_monitor = None  # Optional[PerfMonitor]，懒创建
         # 设备属性不随屏幕变化，长期缓存
         self._device_props: Optional[Dict[str, str]] = None
         # main ability 探测缓存（per-driver 实例，多设备隔离）
@@ -131,6 +132,11 @@ class HarmonyDriver(BaseDriver):
         if self._closed:
             return
         self._closed = True
+        try:
+            if self._perf_monitor is not None and self._perf_monitor.running:
+                self._perf_monitor.stop()
+        except Exception as e:
+            logger.debug("关闭性能监控异常（忽略）: %s", e)
         try:
             self._stop_screenshot_stream()
         except Exception as e:
@@ -931,6 +937,53 @@ class HarmonyDriver(BaseDriver):
         if self._screenshot_stream is not None:
             self._screenshot_stream.stop()
             self._screenshot_stream = None
+
+    # ============================================================
+    # 性能监控（SP_daemon）
+    # ============================================================
+
+    def start_perf_monitor(self, package_name: str) -> None:
+        """启动应用性能监控。
+
+        通过设备端 ``SP_daemon`` 持续采集 FPS / CPU / GPU / 内存 / 网络。
+        包名需调用方手动传入。同一驱动实例同时仅支持一路监控。
+
+        Args:
+            package_name: 目标应用包名
+        """
+        if self._closed:
+            raise DevhelmError("驱动已关闭")
+        if self._perf_monitor is None:
+            from devhelmkit.harmony.perf import PerfMonitor
+            self._perf_monitor = PerfMonitor(self._device)
+        self._perf_monitor.start(package_name)
+
+    def stop_perf_monitor(self, path: Optional[str] = None) -> List[Any]:
+        """停止性能监控；传入 path 时同时导出 Excel（``.xlsx``）。
+
+        Args:
+            path: 可选导出路径（``.xlsx``）。未传入则只停止并返回数据。
+
+        Returns:
+            本次采集到的 ``PerfDataPoint`` 列表
+
+        Raises:
+            DevhelmError: 监控未启动，或指定导出但无采样数据
+        """
+        if self._perf_monitor is None:
+            raise DevhelmError("性能监控未启动")
+        package_name = self._perf_monitor.package_name or "data"
+        points = self._perf_monitor.stop()
+        if path:
+            if not points:
+                raise DevhelmError("无性能数据可导出")
+            from devhelmkit.harmony.perf import export_perf_xlsx
+            export_perf_xlsx(points, path, package_name=package_name)
+        return points
+
+    def is_perf_monitor_running(self) -> bool:
+        """性能监控是否正在运行。"""
+        return bool(self._perf_monitor and self._perf_monitor.running)
 
     # ============================================================
     # 录屏

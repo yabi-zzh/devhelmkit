@@ -57,6 +57,7 @@
   - [触控板](#触控板)
   - [事件监听](#事件监听)
   - [WebView](#webview)
+  - [性能监控](#性能监控)
 - [数据类型](#数据类型)
   - [Rect](#rect)
   - [Point](#point)
@@ -68,6 +69,7 @@
   - [OcrResult](#ocrresult)
   - [SelectorSpec](#selectorspec)
   - [HarmonyDriverConfig](#harmonydriverconfig)
+  - [PerfDataPoint](#perfdatapoint)
 - [异常体系](#异常体系)
 
 ---
@@ -1243,6 +1245,46 @@ wv.close()
 
 ---
 
+### 性能监控
+
+通过设备端 `SP_daemon` 采集目标应用的 FPS / CPU / GPU / 内存 / 网络。包名需手动传入；与 UIViewer `--perf`（投屏链路诊断日志）相互独立。启动后第一条采样视为暖机数据自动丢弃（仍用于网络速率差分基准）。
+
+#### `start_perf_monitor(package_name: str) -> None`
+
+启动性能监控。同一驱动实例同时仅支持一路。
+
+| 参数 | 说明 |
+|------|------|
+| package_name | 目标应用包名 |
+
+```python
+d.start_perf_monitor("com.example.app")
+```
+
+#### `stop_perf_monitor(path: Optional[str] = None) -> List[PerfDataPoint]`
+
+停止监控并返回采样点列表。传入 `path` 时同时导出 Excel（`.xlsx`）。
+
+| 参数 | 说明 |
+|------|------|
+| path | 可选导出路径；未传则只停止并返回数据 |
+
+```python
+# 停采集并落盘
+points = d.stop_perf_monitor("./perf_com.example.app.xlsx")
+
+# 只停，不写文件
+points = d.stop_perf_monitor()
+```
+
+导出表结构：双层表头（时间 / FPS / CPU / GPU / 内存 / 网络），列含 Time、FPS、RefreshRate、Jank、App %、Total %、C0..Cn %、GPU %、PSS (MB)、Heap (MB)、Down (KB/s)、Up (KB/s)。
+
+#### `is_perf_monitor_running() -> bool`
+
+性能监控是否正在运行。
+
+---
+
 ## 数据类型
 
 ### Rect
@@ -1422,6 +1464,26 @@ d = devhelmkit.connect(config=config)
 | stop_daemon_on_close | bool | False | `close()` 时是否停止 uitest 守护进程 |
 | restart_daemon_on_setup | bool | False | setup 时是否先清理残留 uitest 守护进程再重启（绕过复用优先） |
 | hdc_path | str | `"hdc"` | hdc 可执行文件路径 |
+
+---
+
+### PerfDataPoint
+
+```python
+from devhelmkit.harmony.perf import PerfDataPoint
+```
+
+`stop_perf_monitor()` 返回的单次采样点。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| timestamp | float | 设备侧采样时间戳（毫秒） |
+| time_label | str | 时间标签（`HH:MM:SS.mmm`，由设备时间戳格式化） |
+| fps | FpsSample | `fps` / `refresh_rate` / `jank_count` |
+| cpu | CpuSample | `proc_usage` / `total_usage` / `cores` |
+| gpu | GpuSample | `load` |
+| memory | MemorySample | `pss` / `heap_size` / `heap_alloc` / `mem_available` / `mem_total`（MB） |
+| network | NetworkSample | `down` / `up`（KB/s） |
 
 ---
 

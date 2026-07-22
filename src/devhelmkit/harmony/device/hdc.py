@@ -17,6 +17,7 @@ import select
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -172,6 +173,29 @@ class HdcDevice:
                 "shell 命令失败 [%s]: %s" % (cmd, result.stderr)
             )
         return result.stdout
+
+    def spawn_shell(self, cmd: str) -> subprocess.Popen:
+        """启动长驻 shell 命令，返回 Popen（stdout/stderr 管道）。
+
+        供性能监控等需要持续读 stdout 的场景使用。调用方负责读取
+        输出并在结束时 terminate/kill 子进程。
+        """
+        kwargs: Dict = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "stdin": subprocess.DEVNULL,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "bufsize": 1,
+        }
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            return subprocess.Popen(self._hdc_cmd("shell", cmd), **kwargs)
+        except OSError as e:
+            raise DeviceConnectError(
+                "启动 shell 进程失败 [%s]: %s" % (cmd, e)) from e
 
     def push(self, local_path: str, remote_path: str, timeout: int = 60) -> None:
         """推送文件到设备。"""
