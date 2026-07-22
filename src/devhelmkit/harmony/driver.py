@@ -528,28 +528,36 @@ class HarmonyDriver(BaseDriver):
     # 坐标操作
     # ============================================================
 
-    def click(self, x: int, y: int) -> None:
-        self._rpc.call("Driver.click", DRIVER_REF, [x, y])
+    def click(self, x: Union[int, float], y: Union[int, float]) -> None:
+        ax, ay = self.to_abs_pos(x, y)
+        self._rpc.call("Driver.click", DRIVER_REF, [ax, ay])
 
-    def long_click(self, x: int, y: int, duration: float = 0.5) -> None:
+    def long_click(self, x: Union[int, float], y: Union[int, float],
+                   duration: float = 0.5) -> None:
+        ax, ay = self.to_abs_pos(x, y)
         # 设备端 longClickAt 要求 duration >= 1500ms，低于阈值用 longClick（设备端固定时长）
         duration_ms = int(duration * 1000)
         if duration_ms >= 1500:
             self._rpc.call(
-                "Driver.longClickAt", DRIVER_REF, [{"x": x, "y": y}, duration_ms]
+                "Driver.longClickAt", DRIVER_REF,
+                [{"x": ax, "y": ay}, duration_ms]
             )
         else:
-            self._rpc.call("Driver.longClick", DRIVER_REF, [x, y])
+            self._rpc.call("Driver.longClick", DRIVER_REF, [ax, ay])
 
-    def double_click(self, x: int, y: int) -> None:
-        self._rpc.call("Driver.doubleClick", DRIVER_REF, [x, y])
+    def double_click(self, x: Union[int, float], y: Union[int, float]) -> None:
+        ax, ay = self.to_abs_pos(x, y)
+        self._rpc.call("Driver.doubleClick", DRIVER_REF, [ax, ay])
 
-    def swipe(self, x1: int, y1: int, x2: int, y2: int,
+    def swipe(self, x1: Union[int, float], y1: Union[int, float],
+              x2: Union[int, float], y2: Union[int, float],
               duration: float = 0.5) -> None:
-        distance = max(abs(x2 - x1), abs(y2 - y1), 1)
+        ax1, ay1 = self.to_abs_pos(x1, y1)
+        ax2, ay2 = self.to_abs_pos(x2, y2)
+        distance = max(abs(ax2 - ax1), abs(ay2 - ay1), 1)
         speed = int(distance / duration) if duration > 0 else 600
         self._rpc.call(
-            "Driver.swipe", DRIVER_REF, [x1, y1, x2, y2, speed]
+            "Driver.swipe", DRIVER_REF, [ax1, ay1, ax2, ay2, speed]
         )
 
     def swipe_dir(self, direction: str, distance: int = 60,
@@ -569,12 +577,15 @@ class HarmonyDriver(BaseDriver):
             raise DevhelmError("未知滑动方向: %s" % direction)
         self.swipe(x1, y1, x2, y2)
 
-    def drag(self, x1: int, y1: int, x2: int, y2: int,
+    def drag(self, x1: Union[int, float], y1: Union[int, float],
+             x2: Union[int, float], y2: Union[int, float],
              duration: float = 0.5) -> None:
-        distance = max(abs(x2 - x1), abs(y2 - y1), 1)
+        ax1, ay1 = self.to_abs_pos(x1, y1)
+        ax2, ay2 = self.to_abs_pos(x2, y2)
+        distance = max(abs(ax2 - ax1), abs(ay2 - ay1), 1)
         speed = int(distance / duration) if duration > 0 else 600
         self._rpc.call(
-            "Driver.drag", DRIVER_REF, [x1, y1, x2, y2, speed]
+            "Driver.drag", DRIVER_REF, [ax1, ay1, ax2, ay2, speed]
         )
 
     def fling(self, direction: str, distance: int = 50,

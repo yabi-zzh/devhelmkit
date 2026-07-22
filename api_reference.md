@@ -282,21 +282,30 @@ d.xpath("//List/*[contains(@text, '设置')]").click()
 
 ### 坐标操作
 
-#### `click(x: int, y: int) -> None`
+#### `click(x, y) -> None`
 
-坐标点击。
+坐标点击。每轴在 ``[-1, 1]`` 内按屏幕比例换算，否则按像素。
 
-#### `long_click(x: int, y: int, duration: float = 0.5) -> None`
+```python
+d.click(100, 200)      # 像素
+d.click(0.5, 0.5)      # 屏幕中心
+```
 
-坐标长按。
+#### `long_click(x, y, duration=0.5) -> None`
 
-#### `double_click(x: int, y: int) -> None`
+坐标长按；坐标规则同 `click`。
 
-坐标双击。
+#### `double_click(x, y) -> None`
+
+坐标双击；坐标规则同 `click`。
 
 #### `swipe(x1, y1, x2, y2, duration=0.5) -> None`
 
-从 `(x1, y1)` 滑动到 `(x2, y2)`。
+从起点滑到终点；起止坐标均支持比例 / 像素。
+
+```python
+d.swipe(0.5, 0.8, 0.5, 0.2)   # 屏幕中央上滑
+```
 
 #### `swipe_dir(direction, distance=60, area=None, speed=None) -> None`
 
@@ -311,7 +320,7 @@ d.xpath("//List/*[contains(@text, '设置')]").click()
 
 #### `drag(x1, y1, x2, y2, duration=0.5) -> None`
 
-拖拽。
+拖拽；坐标规则同 `swipe`。
 
 #### `fling(direction, distance=50, area=None, speed="fast") -> None`
 
@@ -639,7 +648,9 @@ if result:
 
 #### `to_abs_pos(x: float, y: float) -> Tuple[int, int]`
 
-比例坐标（0.0–1.0）转绝对像素坐标。
+比例坐标转绝对像素坐标。每轴独立判断：值在 ``[-1, 1]`` 内按对应屏幕边长换算，否则视为像素。
+
+`click` / `long_click` / `double_click` / `swipe` / `drag` 已默认走本转换。
 
 ---
 

@@ -181,21 +181,23 @@ class BaseDriver(ABC):
     # ============================================================
 
     @abstractmethod
-    def click(self, x: int, y: int) -> None:
-        """坐标点击。"""
+    def click(self, x: Union[int, float], y: Union[int, float]) -> None:
+        """坐标点击；``[-1, 1]`` 按屏幕比例，否则按像素。"""
 
     @abstractmethod
-    def long_click(self, x: int, y: int, duration: float = 0.5) -> None:
-        """坐标长按。"""
+    def long_click(self, x: Union[int, float], y: Union[int, float],
+                   duration: float = 0.5) -> None:
+        """坐标长按；``[-1, 1]`` 按屏幕比例，否则按像素。"""
 
     @abstractmethod
-    def double_click(self, x: int, y: int) -> None:
-        """坐标双击。"""
+    def double_click(self, x: Union[int, float], y: Union[int, float]) -> None:
+        """坐标双击；``[-1, 1]`` 按屏幕比例，否则按像素。"""
 
     @abstractmethod
-    def swipe(self, x1: int, y1: int, x2: int, y2: int,
+    def swipe(self, x1: Union[int, float], y1: Union[int, float],
+              x2: Union[int, float], y2: Union[int, float],
               duration: float = 0.5) -> None:
-        """精确滑动（起止坐标）。"""
+        """精确滑动（起止坐标）；``[-1, 1]`` 按屏幕比例，否则按像素。"""
 
     @abstractmethod
     def swipe_dir(self, direction: str, distance: int = 60,
@@ -203,9 +205,10 @@ class BaseDriver(ABC):
         """方向滑动：'UP' / 'DOWN' / 'LEFT' / 'RIGHT'。"""
 
     @abstractmethod
-    def drag(self, x1: int, y1: int, x2: int, y2: int,
+    def drag(self, x1: Union[int, float], y1: Union[int, float],
+             x2: Union[int, float], y2: Union[int, float],
              duration: float = 0.5) -> None:
-        """拖拽。"""
+        """拖拽；``[-1, 1]`` 按屏幕比例，否则按像素。"""
 
     @abstractmethod
     def fling(self, direction: str, distance: int = 50,
